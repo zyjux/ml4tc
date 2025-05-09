@@ -1,28 +1,31 @@
 """Methods for training and applying neural nets."""
 
-import os
 import copy
-import random
+import functools
+import itertools
+import os
 import pickle
+import random
 import warnings
-import numpy
+from datetime import datetime
+
 import keras
+import matplotlib.pyplot as plt
+import numpy
+import tensorflow as tf
 import tensorflow.keras as tf_keras
-from scipy.interpolate import interp1d
-from gewittergefahr.gg_utils import grids
-from gewittergefahr.gg_utils import time_conversion
-from gewittergefahr.gg_utils import file_system_utils
-from gewittergefahr.gg_utils import error_checking
 from gewittergefahr.deep_learning import data_augmentation
 from gewittergefahr.deep_learning import keras_metrics as custom_metrics
-from ml4tc.io import example_io
-from ml4tc.io import ships_io
-from ml4tc.utils import example_utils
-from ml4tc.utils import satellite_utils
+from gewittergefahr.gg_utils import (error_checking, file_system_utils, grids,
+                                     time_conversion)
+from scipy.interpolate import interp1d
+
+from ml4tc.io import example_io, ships_io
 from ml4tc.machine_learning import custom_losses
+from ml4tc.utils import example_utils, satellite_utils
 
 TOLERANCE = 1e-6
-TIME_FORMAT_FOR_LOG = '%Y-%m-%d-%H%M'
+TIME_FORMAT_FOR_LOG = "%Y-%m-%d-%H%M"
 MISSING_INDEX = int(1e12)
 
 SHIPS_PREDICTORS_SANS_USABLE_FORECAST = [
@@ -39,7 +42,7 @@ SHIPS_PREDICTORS_SANS_USABLE_FORECAST = [
     ships_io.DIVERGENCE_200MB_CENTERED_BIG_RING_KEY,
     ships_io.SURFACE_PRESSURE_OUTER_RING_KEY,
     ships_io.SRH_1000TO700MB_OUTER_RING_KEY,
-    ships_io.SRH_1000TO500MB_OUTER_RING_KEY
+    ships_io.SRH_1000TO500MB_OUTER_RING_KEY,
 ]
 
 MINUTES_TO_SECONDS = 60
@@ -53,75 +56,74 @@ DUMMY_LONGITUDES_DEG_E = numpy.linspace(-120, -110, num=640, dtype=float)
 DUMMY_LATITUDE_MATRIX_DEG_N, DUMMY_LONGITUDE_MATRIX_DEG_E = (
     grids.latlng_vectors_to_matrices(
         unique_latitudes_deg=DUMMY_LATITUDES_DEG_N,
-        unique_longitudes_deg=DUMMY_LONGITUDES_DEG_E
+        unique_longitudes_deg=DUMMY_LONGITUDES_DEG_E,
     )
 )
 
 METRIC_DICT = {
-    'accuracy': custom_metrics.accuracy,
-    'binary_accuracy': custom_metrics.binary_accuracy,
-    'binary_csi': custom_metrics.binary_csi,
-    'binary_frequency_bias': custom_metrics.binary_frequency_bias,
-    'binary_pod': custom_metrics.binary_pod,
-    'binary_pofd': custom_metrics.binary_pofd,
-    'binary_peirce_score': custom_metrics.binary_peirce_score,
-    'binary_success_ratio': custom_metrics.binary_success_ratio,
-    'binary_focn': custom_metrics.binary_focn
+    "accuracy": custom_metrics.accuracy,
+    "binary_accuracy": custom_metrics.binary_accuracy,
+    "binary_csi": custom_metrics.binary_csi,
+    "binary_frequency_bias": custom_metrics.binary_frequency_bias,
+    "binary_pod": custom_metrics.binary_pod,
+    "binary_pofd": custom_metrics.binary_pofd,
+    "binary_peirce_score": custom_metrics.binary_peirce_score,
+    "binary_success_ratio": custom_metrics.binary_success_ratio,
+    "binary_focn": custom_metrics.binary_focn,
 }
 
-SATELLITE_ROWS_KEY = 'satellite_rows_by_example'
-SHIPS_GOES_ROWS_KEY = 'ships_goes_rows_by_example'
-SHIPS_FORECAST_ROWS_KEY = 'ships_forecast_row_by_example'
+SATELLITE_ROWS_KEY = "satellite_rows_by_example"
+SHIPS_GOES_ROWS_KEY = "ships_goes_rows_by_example"
+SHIPS_FORECAST_ROWS_KEY = "ships_forecast_row_by_example"
 
-PREDICTOR_MATRICES_KEY = 'predictor_matrices'
-TARGET_MATRIX_KEY = 'target_class_matrix'
-INIT_TIMES_KEY = 'init_times_unix_sec'
-STORM_LATITUDES_KEY = 'storm_latitudes_deg_n'
-STORM_LONGITUDES_KEY = 'storm_longitudes_deg_e'
-STORM_INTENSITY_CHANGES_KEY = 'storm_intensity_changes_m_s01'
-GRID_LATITUDE_MATRIX_KEY = 'grid_latitude_matrix_deg_n'
-GRID_LONGITUDE_MATRIX_KEY = 'grid_longitude_matrix_deg_e'
+PREDICTOR_MATRICES_KEY = "predictor_matrices"
+TARGET_MATRIX_KEY = "target_class_matrix"
+INIT_TIMES_KEY = "init_times_unix_sec"
+STORM_LATITUDES_KEY = "storm_latitudes_deg_n"
+STORM_LONGITUDES_KEY = "storm_longitudes_deg_e"
+STORM_INTENSITY_CHANGES_KEY = "storm_intensity_changes_m_s01"
+GRID_LATITUDE_MATRIX_KEY = "grid_latitude_matrix_deg_n"
+GRID_LONGITUDE_MATRIX_KEY = "grid_longitude_matrix_deg_e"
 
 PLATEAU_PATIENCE_EPOCHS = 10
 DEFAULT_LEARNING_RATE_MULTIPLIER = 0.5
 PLATEAU_COOLDOWN_EPOCHS = 0
 EARLY_STOPPING_PATIENCE_EPOCHS = 50
-LOSS_PATIENCE = 0.
+LOSS_PATIENCE = 0.0
 
-EXAMPLE_FILE_KEY = 'example_file_name'
-EXAMPLE_DIRECTORY_KEY = 'example_dir_name'
-YEARS_KEY = 'years'
-LEAD_TIMES_KEY = 'lead_times_hours'
-SATELLITE_PREDICTORS_KEY = 'satellite_predictor_names'
-SATELLITE_LAG_TIMES_KEY = 'satellite_lag_times_minutes'
-SHIPS_GOES_PREDICTORS_KEY = 'ships_goes_predictor_names'
-SHIPS_GOES_LAG_TIMES_KEY = 'ships_goes_lag_times_hours'
-SHIPS_FORECAST_PREDICTORS_KEY = 'ships_forecast_predictor_names'
-SHIPS_MAX_FORECAST_HOUR_KEY = 'ships_max_forecast_hour'
-NUM_POSITIVE_EXAMPLES_KEY = 'num_positive_examples_per_batch'
-NUM_NEGATIVE_EXAMPLES_KEY = 'num_negative_examples_per_batch'
-MAX_EXAMPLES_PER_CYCLONE_KEY = 'max_examples_per_cyclone_in_batch'
-PREDICT_TD_TO_TS_KEY = 'predict_td_to_ts'
-CLASS_CUTOFFS_KEY = 'class_cutoffs_m_s01'
-NUM_GRID_ROWS_KEY = 'num_grid_rows'
-NUM_GRID_COLUMNS_KEY = 'num_grid_columns'
-USE_TIME_DIFFS_KEY = 'use_time_diffs_gridded_sat'
-SATELLITE_TIME_TOLERANCE_KEY = 'satellite_time_tolerance_sec'
-SATELLITE_MAX_MISSING_TIMES_KEY = 'satellite_max_missing_times'
-SHIPS_TIME_TOLERANCE_KEY = 'ships_time_tolerance_sec'
-SHIPS_MAX_MISSING_TIMES_KEY = 'ships_max_missing_times'
-USE_CLIMO_KEY = 'use_climo_as_backup'
-DATA_AUG_NUM_TRANS_KEY = 'data_aug_num_translations'
-DATA_AUG_MAX_TRANS_KEY = 'data_aug_max_translation_px'
-DATA_AUG_NUM_ROTATIONS_KEY = 'data_aug_num_rotations'
-DATA_AUG_MAX_ROTATION_KEY = 'data_aug_max_rotation_deg'
-DATA_AUG_NUM_NOISINGS_KEY = 'data_aug_num_noisings'
-DATA_AUG_NOISE_STDEV_KEY = 'data_aug_noise_stdev'
-WEST_PACIFIC_WEIGHT_KEY = 'west_pacific_weight'
+EXAMPLE_FILE_KEY = "example_file_name"
+EXAMPLE_DIRECTORY_KEY = "example_dir_name"
+YEARS_KEY = "years"
+LEAD_TIMES_KEY = "lead_times_hours"
+SATELLITE_PREDICTORS_KEY = "satellite_predictor_names"
+SATELLITE_LAG_TIMES_KEY = "satellite_lag_times_minutes"
+SHIPS_GOES_PREDICTORS_KEY = "ships_goes_predictor_names"
+SHIPS_GOES_LAG_TIMES_KEY = "ships_goes_lag_times_hours"
+SHIPS_FORECAST_PREDICTORS_KEY = "ships_forecast_predictor_names"
+SHIPS_MAX_FORECAST_HOUR_KEY = "ships_max_forecast_hour"
+NUM_POSITIVE_EXAMPLES_KEY = "num_positive_examples_per_batch"
+NUM_NEGATIVE_EXAMPLES_KEY = "num_negative_examples_per_batch"
+MAX_EXAMPLES_PER_CYCLONE_KEY = "max_examples_per_cyclone_in_batch"
+PREDICT_TD_TO_TS_KEY = "predict_td_to_ts"
+CLASS_CUTOFFS_KEY = "class_cutoffs_m_s01"
+NUM_GRID_ROWS_KEY = "num_grid_rows"
+NUM_GRID_COLUMNS_KEY = "num_grid_columns"
+USE_TIME_DIFFS_KEY = "use_time_diffs_gridded_sat"
+SATELLITE_TIME_TOLERANCE_KEY = "satellite_time_tolerance_sec"
+SATELLITE_MAX_MISSING_TIMES_KEY = "satellite_max_missing_times"
+SHIPS_TIME_TOLERANCE_KEY = "ships_time_tolerance_sec"
+SHIPS_MAX_MISSING_TIMES_KEY = "ships_max_missing_times"
+USE_CLIMO_KEY = "use_climo_as_backup"
+DATA_AUG_NUM_TRANS_KEY = "data_aug_num_translations"
+DATA_AUG_MAX_TRANS_KEY = "data_aug_max_translation_px"
+DATA_AUG_NUM_ROTATIONS_KEY = "data_aug_num_rotations"
+DATA_AUG_MAX_ROTATION_KEY = "data_aug_max_rotation_deg"
+DATA_AUG_NUM_NOISINGS_KEY = "data_aug_num_noisings"
+DATA_AUG_NOISE_STDEV_KEY = "data_aug_noise_stdev"
+WEST_PACIFIC_WEIGHT_KEY = "west_pacific_weight"
 
-ALL_SATELLITE_PREDICTOR_NAMES = (
-    set(satellite_utils.FIELD_NAMES) -
-    set(example_utils.SATELLITE_METADATA_KEYS)
+ALL_SATELLITE_PREDICTOR_NAMES = set(satellite_utils.FIELD_NAMES) - set(
+    example_utils.SATELLITE_METADATA_KEYS
 )
 # ALL_SATELLITE_PREDICTOR_NAMES.remove(
 #     satellite_utils.BRIGHTNESS_TEMPERATURE_KEY
@@ -129,24 +131,19 @@ ALL_SATELLITE_PREDICTOR_NAMES = (
 ALL_SATELLITE_PREDICTOR_NAMES = list(ALL_SATELLITE_PREDICTOR_NAMES)
 DEFAULT_SATELLITE_PREDICTOR_NAMES = copy.deepcopy(ALL_SATELLITE_PREDICTOR_NAMES)
 
-ALL_SHIPS_GOES_PREDICTOR_NAMES = (
-    set(ships_io.SATELLITE_FIELD_NAMES) -
-    set(example_utils.SHIPS_METADATA_KEYS)
+ALL_SHIPS_GOES_PREDICTOR_NAMES = set(ships_io.SATELLITE_FIELD_NAMES) - set(
+    example_utils.SHIPS_METADATA_KEYS
 )
 ALL_SHIPS_GOES_PREDICTOR_NAMES.discard(ships_io.VALID_TIME_KEY)
 ALL_SHIPS_GOES_PREDICTOR_NAMES.discard(ships_io.SATELLITE_LAG_TIME_KEY)
 ALL_SHIPS_GOES_PREDICTOR_NAMES = list(ALL_SHIPS_GOES_PREDICTOR_NAMES)
-DEFAULT_SHIPS_GOES_PREDICTOR_NAMES = copy.deepcopy(
-    ALL_SHIPS_GOES_PREDICTOR_NAMES
-)
+DEFAULT_SHIPS_GOES_PREDICTOR_NAMES = copy.deepcopy(ALL_SHIPS_GOES_PREDICTOR_NAMES)
 
-ALL_SHIPS_FORECAST_PREDICTOR_NAMES = (
-    set(ships_io.FORECAST_FIELD_NAMES) -
-    set(example_utils.SHIPS_METADATA_KEYS)
+ALL_SHIPS_FORECAST_PREDICTOR_NAMES = set(ships_io.FORECAST_FIELD_NAMES) - set(
+    example_utils.SHIPS_METADATA_KEYS
 )
-ALL_SHIPS_FORECAST_PREDICTOR_NAMES = (
-    ALL_SHIPS_FORECAST_PREDICTOR_NAMES |
-    set(example_utils.SHIPS_METADATA_AND_FORECAST_KEYS)
+ALL_SHIPS_FORECAST_PREDICTOR_NAMES = ALL_SHIPS_FORECAST_PREDICTOR_NAMES | set(
+    example_utils.SHIPS_METADATA_AND_FORECAST_KEYS
 )
 ALL_SHIPS_FORECAST_PREDICTOR_NAMES.discard(ships_io.VALID_TIME_KEY)
 ALL_SHIPS_FORECAST_PREDICTOR_NAMES.discard(ships_io.V_MOTION_KEY)
@@ -178,32 +175,39 @@ DEFAULT_GENERATOR_OPTION_DICT = {
     DATA_AUG_MAX_ROTATION_KEY: None,
     DATA_AUG_NUM_NOISINGS_KEY: 0,
     DATA_AUG_NOISE_STDEV_KEY: None,
-    WEST_PACIFIC_WEIGHT_KEY: None
+    WEST_PACIFIC_WEIGHT_KEY: None,
 }
 
-NUM_EPOCHS_KEY = 'num_epochs'
-USE_CRPS_LOSS_KEY = 'use_crps_loss'
-QUANTILE_LEVELS_KEY = 'quantile_levels'
-CENTRAL_LOSS_WEIGHT_KEY = 'central_loss_function_weight'
-NUM_TRAINING_BATCHES_KEY = 'num_training_batches_per_epoch'
-TRAINING_OPTIONS_KEY = 'training_option_dict'
-NUM_VALIDATION_BATCHES_KEY = 'num_validation_batches_per_epoch'
-VALIDATION_OPTIONS_KEY = 'validation_option_dict'
-EARLY_STOPPING_KEY = 'do_early_stopping'
-PLATEAU_LR_MUTIPLIER_KEY = 'plateau_lr_multiplier'
-BNN_ARCHITECTURE_KEY = 'bnn_architecture_dict'
+NUM_EPOCHS_KEY = "num_epochs"
+USE_CRPS_LOSS_KEY = "use_crps_loss"
+QUANTILE_LEVELS_KEY = "quantile_levels"
+CENTRAL_LOSS_WEIGHT_KEY = "central_loss_function_weight"
+NUM_TRAINING_BATCHES_KEY = "num_training_batches_per_epoch"
+TRAINING_OPTIONS_KEY = "training_option_dict"
+NUM_VALIDATION_BATCHES_KEY = "num_validation_batches_per_epoch"
+VALIDATION_OPTIONS_KEY = "validation_option_dict"
+EARLY_STOPPING_KEY = "do_early_stopping"
+PLATEAU_LR_MUTIPLIER_KEY = "plateau_lr_multiplier"
+BNN_ARCHITECTURE_KEY = "bnn_architecture_dict"
 
 METADATA_KEYS = [
-    NUM_EPOCHS_KEY, USE_CRPS_LOSS_KEY, QUANTILE_LEVELS_KEY,
-    CENTRAL_LOSS_WEIGHT_KEY, NUM_TRAINING_BATCHES_KEY, TRAINING_OPTIONS_KEY,
-    NUM_VALIDATION_BATCHES_KEY, VALIDATION_OPTIONS_KEY,
-    EARLY_STOPPING_KEY, PLATEAU_LR_MUTIPLIER_KEY, BNN_ARCHITECTURE_KEY
+    NUM_EPOCHS_KEY,
+    USE_CRPS_LOSS_KEY,
+    QUANTILE_LEVELS_KEY,
+    CENTRAL_LOSS_WEIGHT_KEY,
+    NUM_TRAINING_BATCHES_KEY,
+    TRAINING_OPTIONS_KEY,
+    NUM_VALIDATION_BATCHES_KEY,
+    VALIDATION_OPTIONS_KEY,
+    EARLY_STOPPING_KEY,
+    PLATEAU_LR_MUTIPLIER_KEY,
+    BNN_ARCHITECTURE_KEY,
 ]
 
 
 def _find_desired_times(
-        all_times_unix_sec, desired_times_unix_sec, tolerance_sec,
-        max_num_missing_times):
+    all_times_unix_sec, desired_times_unix_sec, tolerance_sec, max_num_missing_times
+):
     """Finds desired times.
 
     L = number of desired times
@@ -234,8 +238,8 @@ def _find_desired_times(
             )
 
             warning_string = (
-                'POTENTIAL ERROR: Could not find time within {0:d} seconds of '
-                '{1:s}.  Nearest found time is {2:s}.'
+                "POTENTIAL ERROR: Could not find time within {0:d} seconds of "
+                "{1:s}.  Nearest found time is {2:s}."
             ).format(tolerance_sec, desired_time_string, found_time_string)
 
             warnings.warn(warning_string)
@@ -305,9 +309,7 @@ def _interp_missing_times_nonspatial(data_values, times_sec):
     assert not numpy.all(missing_time_flags)
 
     missing_time_indices = numpy.where(missing_time_flags)[0]
-    found_time_indices = numpy.where(
-        numpy.invert(missing_time_flags)
-    )[0]
+    found_time_indices = numpy.where(numpy.invert(missing_time_flags))[0]
 
     if len(found_time_indices) == 1:
         data_values[missing_time_indices] = data_values[found_time_indices[0]]
@@ -315,16 +317,17 @@ def _interp_missing_times_nonspatial(data_values, times_sec):
 
     fill_values = (
         data_values[found_time_indices[0]],
-        data_values[found_time_indices[-1]]
+        data_values[found_time_indices[-1]],
     )
     interp_object = interp1d(
-        times_sec[found_time_indices], data_values[found_time_indices],
-        kind='linear', bounds_error=False, assume_sorted=True,
-        fill_value=fill_values
+        times_sec[found_time_indices],
+        data_values[found_time_indices],
+        kind="linear",
+        bounds_error=False,
+        assume_sorted=True,
+        fill_value=fill_values,
     )
-    data_values[missing_time_indices] = interp_object(
-        times_sec[missing_time_indices]
-    )
+    data_values[missing_time_indices] = interp_object(times_sec[missing_time_indices])
 
     return data_values
 
@@ -351,9 +354,7 @@ def _interp_missing_times_spatial(data_matrix, times_sec):
     assert not numpy.all(missing_time_flags)
 
     missing_time_indices = numpy.where(missing_time_flags)[0]
-    found_time_indices = numpy.where(
-        numpy.invert(missing_time_flags)
-    )[0]
+    found_time_indices = numpy.where(numpy.invert(missing_time_flags))[0]
 
     for j in missing_time_indices:
         these_diffs = (j - found_time_indices).astype(float)
@@ -391,12 +392,9 @@ def _interp_missing_times_spatial(data_matrix, times_sec):
         time_fraction = float(actual_time_diff_sec) / reference_time_diff_sec
 
         increment_matrix = time_fraction * (
-            data_matrix[..., right_time_index] -
-            data_matrix[..., left_time_index]
+            data_matrix[..., right_time_index] - data_matrix[..., left_time_index]
         )
-        data_matrix[..., j] = (
-            data_matrix[..., left_time_index] + increment_matrix
-        )
+        data_matrix[..., j] = data_matrix[..., left_time_index] + increment_matrix
 
     return data_matrix
 
@@ -452,7 +450,7 @@ def _discretize_intensity_change(intensity_change_m_s01, class_cutoffs_m_s01):
     """
 
     class_index = numpy.searchsorted(
-        class_cutoffs_m_s01, intensity_change_m_s01, side='right'
+        class_cutoffs_m_s01, intensity_change_m_s01, side="right"
     )
     class_flags = numpy.full(len(class_cutoffs_m_s01) + 1, 0, dtype=int)
     class_flags[class_index] = 1
@@ -461,11 +459,19 @@ def _discretize_intensity_change(intensity_change_m_s01, class_cutoffs_m_s01):
 
 
 def _find_all_desired_times(
-        example_table_xarray, init_time_unix_sec, lead_times_sec,
-        satellite_lag_times_sec, ships_goes_lag_times_sec, predict_td_to_ts,
-        satellite_time_tolerance_sec, satellite_max_missing_times,
-        ships_time_tolerance_sec, ships_max_missing_times,
-        use_climo_as_backup, class_cutoffs_m_s01=None):
+    example_table_xarray,
+    init_time_unix_sec,
+    lead_times_sec,
+    satellite_lag_times_sec,
+    ships_goes_lag_times_sec,
+    predict_td_to_ts,
+    satellite_time_tolerance_sec,
+    satellite_max_missing_times,
+    ships_time_tolerance_sec,
+    ships_max_missing_times,
+    use_climo_as_backup,
+    class_cutoffs_m_s01=None,
+):
     """Finds all desired times (for predictors & target) at one fcst-init time.
 
     T = number of lag times for satellite data
@@ -506,17 +512,16 @@ def _find_all_desired_times(
         satellite_indices = None
     else:
         satellite_indices = _find_desired_times(
-            all_times_unix_sec=
-            xt.coords[example_utils.SATELLITE_TIME_DIM].values,
+            all_times_unix_sec=xt.coords[example_utils.SATELLITE_TIME_DIM].values,
             desired_times_unix_sec=init_time_unix_sec - satellite_lag_times_sec,
             tolerance_sec=satellite_time_tolerance_sec,
-            max_num_missing_times=satellite_max_missing_times
+            max_num_missing_times=satellite_max_missing_times,
         )
 
     if (
-            satellite_indices is None
-            and satellite_lag_times_sec is not None
-            and not use_climo_as_backup
+        satellite_indices is None
+        and satellite_lag_times_sec is not None
+        and not use_climo_as_backup
     ):
         desired_time_strings = [
             time_conversion.unix_sec_to_string(
@@ -526,8 +531,8 @@ def _find_all_desired_times(
         ]
 
         warning_string = (
-            'POTENTIAL ERROR: No satellite predictors found within {0:d} '
-            'seconds of any desired time:\n{1:s}'
+            "POTENTIAL ERROR: No satellite predictors found within {0:d} "
+            "seconds of any desired time:\n{1:s}"
         ).format(satellite_time_tolerance_sec, str(desired_time_strings))
 
         warnings.warn(warning_string)
@@ -537,18 +542,16 @@ def _find_all_desired_times(
         ships_goes_indices = None
     else:
         ships_goes_indices = _find_desired_times(
-            all_times_unix_sec=
-            xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values,
-            desired_times_unix_sec=
-            init_time_unix_sec - ships_goes_lag_times_sec,
+            all_times_unix_sec=xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values,
+            desired_times_unix_sec=init_time_unix_sec - ships_goes_lag_times_sec,
             tolerance_sec=ships_time_tolerance_sec,
-            max_num_missing_times=ships_max_missing_times
+            max_num_missing_times=ships_max_missing_times,
         )
 
     if (
-            ships_goes_indices is None
-            and ships_goes_lag_times_sec is not None
-            and not use_climo_as_backup
+        ships_goes_indices is None
+        and ships_goes_lag_times_sec is not None
+        and not use_climo_as_backup
     ):
         desired_time_strings = [
             time_conversion.unix_sec_to_string(
@@ -558,8 +561,8 @@ def _find_all_desired_times(
         ]
 
         warning_string = (
-            'POTENTIAL ERROR: No SHIPS GOES predictors found within {0:d} '
-            'seconds of any desired time:\n{1:s}'
+            "POTENTIAL ERROR: No SHIPS GOES predictors found within {0:d} "
+            "seconds of any desired time:\n{1:s}"
         ).format(ships_time_tolerance_sec, str(desired_time_strings))
 
         warnings.warn(warning_string)
@@ -567,13 +570,13 @@ def _find_all_desired_times(
         return None, None, None, None, None
 
     if example_utils.SHIPS_METADATA_TIME_DIM in xt.coords:
-        all_metadata_times_unix_sec = (
-            xt.coords[example_utils.SHIPS_METADATA_TIME_DIM].values
-        )
+        all_metadata_times_unix_sec = xt.coords[
+            example_utils.SHIPS_METADATA_TIME_DIM
+        ].values
     else:
-        all_metadata_times_unix_sec = (
-            xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values
-        )
+        all_metadata_times_unix_sec = xt.coords[
+            example_utils.SHIPS_VALID_TIME_DIM
+        ].values
 
     ships_forecast_index = numpy.where(
         all_metadata_times_unix_sec == init_time_unix_sec
@@ -584,18 +587,18 @@ def _find_all_desired_times(
             all_metadata_times_unix_sec == init_time_unix_sec
         )[0][0]
 
-        init_intensity_m_s01 = (
-            xt[example_utils.STORM_INTENSITY_KEY].values[init_time_index]
-        )
+        init_intensity_m_s01 = xt[example_utils.STORM_INTENSITY_KEY].values[
+            init_time_index
+        ]
         if init_intensity_m_s01 >= MIN_TROP_STORM_INTENSITY_M_S01:
             return None, None, None, None, None
 
         zero_hour_index = numpy.where(
             xt.coords[example_utils.SHIPS_FORECAST_HOUR_DIM].values == 0
         )[0][0]
-        init_storm_type_enum = (
-            xt[ships_io.STORM_TYPE_KEY].values[init_time_index, zero_hour_index]
-        )
+        init_storm_type_enum = xt[ships_io.STORM_TYPE_KEY].values[
+            init_time_index, zero_hour_index
+        ]
         if init_storm_type_enum != 1:
             return None, None, None, None, None
 
@@ -603,47 +606,57 @@ def _find_all_desired_times(
         target_class_matrix = numpy.full((num_lead_times, 2), 0, dtype=bool)
 
         for k in range(num_lead_times):
-            num_desired_times = 1 + int(numpy.round(
-                float(lead_times_sec[k]) / (6 * HOURS_TO_SECONDS)
-            ))
+            num_desired_times = 1 + int(
+                numpy.round(float(lead_times_sec[k]) / (6 * HOURS_TO_SECONDS))
+            )
             desired_times_unix_sec = numpy.linspace(
-                init_time_unix_sec, init_time_unix_sec + lead_times_sec[k],
-                num=num_desired_times, dtype=int
+                init_time_unix_sec,
+                init_time_unix_sec + lead_times_sec[k],
+                num=num_desired_times,
+                dtype=int,
             )
 
             target_indices = _find_desired_times(
                 all_times_unix_sec=all_metadata_times_unix_sec,
                 desired_times_unix_sec=desired_times_unix_sec,
-                tolerance_sec=0, max_num_missing_times=int(1e10)
+                tolerance_sec=0,
+                max_num_missing_times=int(1e10),
             )
             target_indices = target_indices[target_indices != MISSING_INDEX]
 
-            intensities_m_s01 = (
-                xt[example_utils.STORM_INTENSITY_KEY].values[target_indices]
-            )
+            intensities_m_s01 = xt[example_utils.STORM_INTENSITY_KEY].values[
+                target_indices
+            ]
             storm_type_enums = xt[ships_io.STORM_TYPE_KEY].values[
                 target_indices, zero_hour_index
             ]
 
-            target_class_matrix[k, 1] = numpy.any(numpy.logical_and(
-                intensities_m_s01 >= MIN_TROP_STORM_INTENSITY_M_S01,
-                storm_type_enums == 1
-            ))
+            target_class_matrix[k, 1] = numpy.any(
+                numpy.logical_and(
+                    intensities_m_s01 >= MIN_TROP_STORM_INTENSITY_M_S01,
+                    storm_type_enums == 1,
+                )
+            )
             target_class_matrix[k, 0] = numpy.invert(target_class_matrix[k, 1])
 
         return (
-            satellite_indices, ships_goes_indices, ships_forecast_index,
-            target_class_matrix.astype(int), None
+            satellite_indices,
+            ships_goes_indices,
+            ships_forecast_index,
+            target_class_matrix.astype(int),
+            None,
         )
 
     lead_time_sec = lead_times_sec[0]
 
-    num_desired_times = 1 + int(numpy.round(
-        float(lead_time_sec) / (6 * HOURS_TO_SECONDS)
-    ))
+    num_desired_times = 1 + int(
+        numpy.round(float(lead_time_sec) / (6 * HOURS_TO_SECONDS))
+    )
     desired_times_unix_sec = numpy.linspace(
-        init_time_unix_sec, init_time_unix_sec + lead_time_sec,
-        num=num_desired_times, dtype=int
+        init_time_unix_sec,
+        init_time_unix_sec + lead_time_sec,
+        num=num_desired_times,
+        dtype=int,
     )
     target_indices = _find_desired_times(
         all_times_unix_sec=all_metadata_times_unix_sec,
@@ -651,7 +664,7 @@ def _find_all_desired_times(
         tolerance_sec=0,
         max_num_missing_times=numpy.sum(
             desired_times_unix_sec > numpy.max(all_metadata_times_unix_sec)
-        )
+        ),
     )
 
     if target_indices is None:
@@ -661,40 +674,48 @@ def _find_all_desired_times(
         ]
 
         warning_string = (
-            'POTENTIAL ERROR: Cannot find intensity for at least one of '
-            'the following times:\n{0:s}'
+            "POTENTIAL ERROR: Cannot find intensity for at least one of "
+            "the following times:\n{0:s}"
         ).format(str(valid_time_strings))
 
         warnings.warn(warning_string)
         return None, None, None, None, None
 
     target_indices = target_indices[target_indices != MISSING_INDEX]
-    intensities_m_s01 = (
-        xt[example_utils.STORM_INTENSITY_KEY].values[target_indices]
-    )
-    intensity_change_m_s01 = numpy.max(
-        intensities_m_s01 - intensities_m_s01[0]
-    )
+    intensities_m_s01 = xt[example_utils.STORM_INTENSITY_KEY].values[target_indices]
+    intensity_change_m_s01 = numpy.max(intensities_m_s01 - intensities_m_s01[0])
     target_flags = _discretize_intensity_change(
         intensity_change_m_s01=intensity_change_m_s01,
-        class_cutoffs_m_s01=class_cutoffs_m_s01
+        class_cutoffs_m_s01=class_cutoffs_m_s01,
     )
     target_class_matrix = numpy.expand_dims(target_flags, axis=0)
 
     return (
-        satellite_indices, ships_goes_indices, ships_forecast_index,
-        target_class_matrix, intensity_change_m_s01
+        satellite_indices,
+        ships_goes_indices,
+        ships_forecast_index,
+        target_class_matrix,
+        intensity_change_m_s01,
     )
 
 
 def _read_non_predictors_one_file(
-        example_table_xarray, num_examples_desired,
-        num_positive_examples_desired, num_negative_examples_desired,
-        lead_times_sec, satellite_lag_times_sec, ships_goes_lag_times_sec,
-        predict_td_to_ts, satellite_time_tolerance_sec,
-        satellite_max_missing_times, ships_time_tolerance_sec,
-        ships_max_missing_times, use_climo_as_backup, all_init_times_unix_sec,
-        class_cutoffs_m_s01=None):
+    example_table_xarray,
+    num_examples_desired,
+    num_positive_examples_desired,
+    num_negative_examples_desired,
+    lead_times_sec,
+    satellite_lag_times_sec,
+    ships_goes_lag_times_sec,
+    predict_td_to_ts,
+    satellite_time_tolerance_sec,
+    satellite_max_missing_times,
+    ships_time_tolerance_sec,
+    ships_max_missing_times,
+    use_climo_as_backup,
+    all_init_times_unix_sec,
+    class_cutoffs_m_s01=None,
+):
     """Reads all but predictors from one example file.
 
     E = number of examples
@@ -736,9 +757,7 @@ def _read_non_predictors_one_file(
 
     xt = example_table_xarray
     if all_init_times_unix_sec is None:
-        all_init_times_unix_sec = (
-            xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values
-        )
+        all_init_times_unix_sec = xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values
 
     numpy.random.shuffle(all_init_times_unix_sec)
 
@@ -760,9 +779,10 @@ def _read_non_predictors_one_file(
             these_ships_goes_indices,
             this_ships_forecast_index,
             this_target_class_matrix,
-            this_intensity_change_m_s01
+            this_intensity_change_m_s01,
         ) = _find_all_desired_times(
-            example_table_xarray=xt, init_time_unix_sec=t,
+            example_table_xarray=xt,
+            init_time_unix_sec=t,
             lead_times_sec=lead_times_sec,
             satellite_lag_times_sec=satellite_lag_times_sec,
             ships_goes_lag_times_sec=ships_goes_lag_times_sec,
@@ -772,23 +792,23 @@ def _read_non_predictors_one_file(
             ships_time_tolerance_sec=ships_time_tolerance_sec,
             ships_max_missing_times=ships_max_missing_times,
             use_climo_as_backup=use_climo_as_backup,
-            class_cutoffs_m_s01=class_cutoffs_m_s01
+            class_cutoffs_m_s01=class_cutoffs_m_s01,
         )
 
         if this_target_class_matrix is None:
             continue
 
         if (
-                these_satellite_indices is None
-                and satellite_lag_times_sec is not None
-                and not use_climo_as_backup
+            these_satellite_indices is None
+            and satellite_lag_times_sec is not None
+            and not use_climo_as_backup
         ):
             continue
 
         if (
-                these_ships_goes_indices is None
-                and ships_goes_lag_times_sec is not None
-                and not use_climo_as_backup
+            these_ships_goes_indices is None
+            and ships_goes_lag_times_sec is not None
+            and not use_climo_as_backup
         ):
             continue
 
@@ -804,9 +824,7 @@ def _read_non_predictors_one_file(
 
             num_negative_examples_found += 1
 
-        this_target_class_matrix = numpy.expand_dims(
-            this_target_class_matrix, axis=0
-        )
+        this_target_class_matrix = numpy.expand_dims(this_target_class_matrix, axis=0)
 
         if target_class_matrix is None:
             target_class_matrix = this_target_class_matrix + 0
@@ -829,23 +847,21 @@ def _read_non_predictors_one_file(
                 xt.coords[example_utils.SHIPS_VALID_TIME_DIM].values == t
             )[0][0]
 
-        storm_latitudes_deg_n.append(
-            xt[ships_io.STORM_LATITUDE_KEY].values[this_index]
-        )
+        storm_latitudes_deg_n.append(xt[ships_io.STORM_LATITUDE_KEY].values[this_index])
         storm_longitudes_deg_e.append(
             xt[ships_io.STORM_LONGITUDE_KEY].values[this_index]
         )
         storm_intensity_changes_m_s01.append(this_intensity_change_m_s01)
 
         if (
-                num_positive_examples_found >= num_positive_examples_desired and
-                num_negative_examples_found >= num_negative_examples_desired
+            num_positive_examples_found >= num_positive_examples_desired
+            and num_negative_examples_found >= num_negative_examples_desired
         ):
             break
 
         if (
-                num_positive_examples_found + num_negative_examples_found >=
-                num_examples_desired
+            num_positive_examples_found + num_negative_examples_found
+            >= num_examples_desired
         ):
             break
 
@@ -856,26 +872,27 @@ def _read_non_predictors_one_file(
     if predict_td_to_ts:
         storm_intensity_changes_m_s01 = None
     else:
-        storm_intensity_changes_m_s01 = numpy.array(
-            storm_intensity_changes_m_s01
-        )
+        storm_intensity_changes_m_s01 = numpy.array(storm_intensity_changes_m_s01)
 
     return {
         SATELLITE_ROWS_KEY: satellite_rows_by_example,
         SHIPS_GOES_ROWS_KEY: ships_goes_rows_by_example,
-        SHIPS_FORECAST_ROWS_KEY:
-            numpy.array(ships_forecast_row_by_example, dtype=int),
+        SHIPS_FORECAST_ROWS_KEY: numpy.array(ships_forecast_row_by_example, dtype=int),
         TARGET_MATRIX_KEY: target_class_matrix,
         INIT_TIMES_KEY: init_times_unix_sec,
         STORM_LATITUDES_KEY: storm_latitudes_deg_n,
         STORM_LONGITUDES_KEY: storm_longitudes_deg_e,
-        STORM_INTENSITY_CHANGES_KEY: storm_intensity_changes_m_s01
+        STORM_INTENSITY_CHANGES_KEY: storm_intensity_changes_m_s01,
     }
 
 
 def _read_brightness_temp_one_file(
-        example_table_xarray, table_rows_by_example, lag_times_sec,
-        num_grid_rows=None, num_grid_columns=None):
+    example_table_xarray,
+    table_rows_by_example,
+    lag_times_sec,
+    num_grid_rows=None,
+    num_grid_columns=None,
+):
     """Reads brightness-temperature grids from one example file.
 
     E = number of examples
@@ -899,16 +916,19 @@ def _read_brightness_temp_one_file(
 
     num_examples = len(table_rows_by_example)
     num_lag_times = len(lag_times_sec)
-    num_grid_rows_orig = (
-        xt[example_utils.SATELLITE_PREDICTORS_GRIDDED_KEY].values.shape[1]
-    )
-    num_grid_columns_orig = (
-        xt[example_utils.SATELLITE_PREDICTORS_GRIDDED_KEY].values.shape[2]
-    )
+    num_grid_rows_orig = xt[
+        example_utils.SATELLITE_PREDICTORS_GRIDDED_KEY
+    ].values.shape[1]
+    num_grid_columns_orig = xt[
+        example_utils.SATELLITE_PREDICTORS_GRIDDED_KEY
+    ].values.shape[2]
 
     these_dim = (
-        num_examples, num_grid_rows_orig, num_grid_columns_orig,
-        num_lag_times, 1
+        num_examples,
+        num_grid_rows_orig,
+        num_grid_columns_orig,
+        num_lag_times,
+        1,
     )
     brightness_temp_matrix = numpy.full(these_dim, numpy.nan)
 
@@ -923,8 +943,10 @@ def _read_brightness_temp_one_file(
         )
     else:
         dimensions = (
-            num_examples, num_grid_rows_orig, num_grid_columns_orig,
-            num_lag_times
+            num_examples,
+            num_grid_rows_orig,
+            num_grid_columns_orig,
+            num_lag_times,
         )
         grid_latitude_matrix_deg_n = numpy.full(dimensions, numpy.nan)
         grid_longitude_matrix_deg_e = numpy.full(dimensions, numpy.nan)
@@ -932,21 +954,19 @@ def _read_brightness_temp_one_file(
     for i in range(num_examples):
         for j in range(len(lag_times_sec)):
             if table_rows_by_example[i] is None:
-                brightness_temp_matrix[i, ..., j, 0] = 0.
+                brightness_temp_matrix[i, ..., j, 0] = 0.0
 
                 if regular_grids:
-                    grid_latitude_matrix_deg_n[i, :, j] = (
-                        DUMMY_LATITUDES_DEG_N[:num_grid_rows_orig]
-                    )
-                    grid_longitude_matrix_deg_e[i, :, j] = (
-                        DUMMY_LONGITUDES_DEG_E[:num_grid_columns_orig]
-                    )
+                    grid_latitude_matrix_deg_n[i, :, j] = DUMMY_LATITUDES_DEG_N[
+                        :num_grid_rows_orig
+                    ]
+                    grid_longitude_matrix_deg_e[i, :, j] = DUMMY_LONGITUDES_DEG_E[
+                        :num_grid_columns_orig
+                    ]
                 else:
-                    grid_latitude_matrix_deg_n[i, ..., j] = (
-                        DUMMY_LATITUDE_MATRIX_DEG_N[
-                            :num_grid_rows_orig, :num_grid_columns_orig
-                        ]
-                    )
+                    grid_latitude_matrix_deg_n[i, ..., j] = DUMMY_LATITUDE_MATRIX_DEG_N[
+                        :num_grid_rows_orig, :num_grid_columns_orig
+                    ]
                     grid_longitude_matrix_deg_e[i, ..., j] = (
                         DUMMY_LONGITUDE_MATRIX_DEG_E[
                             :num_grid_rows_orig, :num_grid_columns_orig
@@ -959,18 +979,16 @@ def _read_brightness_temp_one_file(
 
             if k == MISSING_INDEX:
                 if regular_grids:
-                    grid_latitude_matrix_deg_n[i, :, j] = (
-                        DUMMY_LATITUDES_DEG_N[:num_grid_rows_orig]
-                    )
-                    grid_longitude_matrix_deg_e[i, :, j] = (
-                        DUMMY_LONGITUDES_DEG_E[:num_grid_columns_orig]
-                    )
+                    grid_latitude_matrix_deg_n[i, :, j] = DUMMY_LATITUDES_DEG_N[
+                        :num_grid_rows_orig
+                    ]
+                    grid_longitude_matrix_deg_e[i, :, j] = DUMMY_LONGITUDES_DEG_E[
+                        :num_grid_columns_orig
+                    ]
                 else:
-                    grid_latitude_matrix_deg_n[i, ..., j] = (
-                        DUMMY_LATITUDE_MATRIX_DEG_N[
-                            :num_grid_rows_orig, :num_grid_columns_orig
-                        ]
-                    )
+                    grid_latitude_matrix_deg_n[i, ..., j] = DUMMY_LATITUDE_MATRIX_DEG_N[
+                        :num_grid_rows_orig, :num_grid_columns_orig
+                    ]
                     grid_longitude_matrix_deg_e[i, ..., j] = (
                         DUMMY_LONGITUDE_MATRIX_DEG_E[
                             :num_grid_rows_orig, :num_grid_columns_orig
@@ -980,33 +998,39 @@ def _read_brightness_temp_one_file(
                 continue
 
             try:
-                these_latitudes_deg_n = (
-                    xt[satellite_utils.GRID_LATITUDE_KEY].values[k, ...]
-                )
-                these_longitudes_deg_e = (
-                    xt[satellite_utils.GRID_LONGITUDE_KEY].values[k, ...]
-                )
+                these_latitudes_deg_n = xt[satellite_utils.GRID_LATITUDE_KEY].values[
+                    k, ...
+                ]
+                these_longitudes_deg_e = xt[satellite_utils.GRID_LONGITUDE_KEY].values[
+                    k, ...
+                ]
 
                 if regular_grids:
                     assert satellite_utils.is_regular_grid_valid(
                         latitudes_deg_n=these_latitudes_deg_n,
-                        longitudes_deg_e=these_longitudes_deg_e
+                        longitudes_deg_e=these_longitudes_deg_e,
                     )[0]
             except:
                 if regular_grids:
                     these_latitudes_deg_n = (
-                        0. + DUMMY_LATITUDES_DEG_N[:num_grid_rows_orig]
+                        0.0 + DUMMY_LATITUDES_DEG_N[:num_grid_rows_orig]
                     )
                     these_longitudes_deg_e = (
-                        0. + DUMMY_LONGITUDES_DEG_E[:num_grid_columns_orig]
+                        0.0 + DUMMY_LONGITUDES_DEG_E[:num_grid_columns_orig]
                     )
                 else:
-                    these_latitudes_deg_n = 0. + DUMMY_LATITUDE_MATRIX_DEG_N[
-                        :num_grid_rows_orig, :num_grid_columns_orig
-                    ]
-                    these_longitudes_deg_e = 0. + DUMMY_LONGITUDE_MATRIX_DEG_E[
-                        :num_grid_rows_orig, num_grid_columns_orig
-                    ]
+                    these_latitudes_deg_n = (
+                        0.0
+                        + DUMMY_LATITUDE_MATRIX_DEG_N[
+                            :num_grid_rows_orig, :num_grid_columns_orig
+                        ]
+                    )
+                    these_longitudes_deg_e = (
+                        0.0
+                        + DUMMY_LONGITUDE_MATRIX_DEG_E[
+                            :num_grid_rows_orig, num_grid_columns_orig
+                        ]
+                    )
 
             grid_latitude_matrix_deg_n[i, ..., j] = these_latitudes_deg_n
             grid_longitude_matrix_deg_e[i, ..., j] = these_longitudes_deg_e
@@ -1018,58 +1042,47 @@ def _read_brightness_temp_one_file(
     if num_grid_rows is not None:
         error_checking.assert_is_less_than(num_grid_rows, num_grid_rows_orig)
 
-        first_index = int(numpy.round(
-            num_grid_rows_orig / 2 - num_grid_rows / 2
-        ))
-        last_index = int(numpy.round(
-            num_grid_rows_orig / 2 + num_grid_rows / 2
-        ))
+        first_index = int(numpy.round(num_grid_rows_orig / 2 - num_grid_rows / 2))
+        last_index = int(numpy.round(num_grid_rows_orig / 2 + num_grid_rows / 2))
 
-        brightness_temp_matrix = (
-            brightness_temp_matrix[:, first_index:last_index, ...]
-        )
-        grid_latitude_matrix_deg_n = (
-            grid_latitude_matrix_deg_n[:, first_index:last_index, ...]
-        )
-        grid_longitude_matrix_deg_e = (
-            grid_longitude_matrix_deg_e[:, first_index:last_index, ...]
-        )
+        brightness_temp_matrix = brightness_temp_matrix[:, first_index:last_index, ...]
+        grid_latitude_matrix_deg_n = grid_latitude_matrix_deg_n[
+            :, first_index:last_index, ...
+        ]
+        grid_longitude_matrix_deg_e = grid_longitude_matrix_deg_e[
+            :, first_index:last_index, ...
+        ]
 
     if num_grid_columns is not None:
-        error_checking.assert_is_less_than(
-            num_grid_columns, num_grid_columns_orig
-        )
+        error_checking.assert_is_less_than(num_grid_columns, num_grid_columns_orig)
 
-        first_index = int(numpy.round(
-            num_grid_columns_orig / 2 - num_grid_columns / 2
-        ))
-        last_index = int(numpy.round(
-            num_grid_columns_orig / 2 + num_grid_columns / 2
-        ))
+        first_index = int(numpy.round(num_grid_columns_orig / 2 - num_grid_columns / 2))
+        last_index = int(numpy.round(num_grid_columns_orig / 2 + num_grid_columns / 2))
 
-        brightness_temp_matrix = (
-            brightness_temp_matrix[:, :, first_index:last_index, ...]
-        )
-        grid_latitude_matrix_deg_n = (
-            grid_latitude_matrix_deg_n[:, :, first_index:last_index, ...]
-        )
-        grid_longitude_matrix_deg_e = (
-            grid_longitude_matrix_deg_e[:, :, first_index:last_index, ...]
-        )
+        brightness_temp_matrix = brightness_temp_matrix[
+            :, :, first_index:last_index, ...
+        ]
+        grid_latitude_matrix_deg_n = grid_latitude_matrix_deg_n[
+            :, :, first_index:last_index, ...
+        ]
+        grid_longitude_matrix_deg_e = grid_longitude_matrix_deg_e[
+            :, :, first_index:last_index, ...
+        ]
 
     brightness_temp_matrix = _interp_missing_times(
         data_matrix=brightness_temp_matrix, times_sec=-1 * lag_times_sec
     )
 
     return (
-        brightness_temp_matrix, grid_latitude_matrix_deg_n,
-        grid_longitude_matrix_deg_e
+        brightness_temp_matrix,
+        grid_latitude_matrix_deg_n,
+        grid_longitude_matrix_deg_e,
     )
 
 
 def _read_scalar_satellite_one_file(
-        example_table_xarray, table_rows_by_example, lag_times_sec,
-        predictor_names):
+    example_table_xarray, table_rows_by_example, lag_times_sec, predictor_names
+):
     """Reads scalar satellite predictors from one example file.
 
     :param example_table_xarray: See doc for `_read_brightness_temp_one_file`.
@@ -1089,19 +1102,17 @@ def _read_scalar_satellite_one_file(
 
     xt = example_table_xarray
 
-    all_predictor_names = (
-        xt.coords[
-            example_utils.SATELLITE_PREDICTOR_UNGRIDDED_DIM
-        ].values.tolist()
+    all_predictor_names = xt.coords[
+        example_utils.SATELLITE_PREDICTOR_UNGRIDDED_DIM
+    ].values.tolist()
+    predictor_indices = numpy.array(
+        [all_predictor_names.index(n) for n in predictor_names], dtype=int
     )
-    predictor_indices = numpy.array([
-        all_predictor_names.index(n) for n in predictor_names
-    ], dtype=int)
 
     for i in range(num_examples):
         for j in range(num_lag_times):
             if table_rows_by_example[i] is None:
-                predictor_matrix[i, j, :] = 0.
+                predictor_matrix[i, j, :] = 0.0
                 continue
 
             k = table_rows_by_example[i][j]
@@ -1118,9 +1129,14 @@ def _read_scalar_satellite_one_file(
 
 
 def _read_ships_one_file(
-        example_table_xarray, goes_predictor_names, goes_lag_times_sec,
-        goes_rows_by_example, forecast_predictor_names, max_forecast_hour,
-        forecast_row_by_example):
+    example_table_xarray,
+    goes_predictor_names,
+    goes_lag_times_sec,
+    goes_rows_by_example,
+    forecast_predictor_names,
+    max_forecast_hour,
+    forecast_row_by_example,
+):
     """Reads SHIPS predictors from one example file.
 
     E = number of examples
@@ -1167,24 +1183,30 @@ def _read_ships_one_file(
         predictor_indices_goes = numpy.array([], dtype=int)
     else:
         this_coord_name = example_utils.SHIPS_PREDICTOR_LAGGED_DIM
-        predictor_indices_goes = numpy.array([
-            xt.coords[this_coord_name].values.tolist().index(n)
-            for n in goes_predictor_names
-        ], dtype=int)
+        predictor_indices_goes = numpy.array(
+            [
+                xt.coords[this_coord_name].values.tolist().index(n)
+                for n in goes_predictor_names
+            ],
+            dtype=int,
+        )
 
     if num_forecast_predictors == 0:
         predictor_indices_forecast = numpy.array([], dtype=int)
     else:
         this_coord_name = example_utils.SHIPS_PREDICTOR_FORECAST_DIM
-        predictor_indices_forecast = numpy.array([
-            xt.coords[this_coord_name].values.tolist().index(n)
-            for n in forecast_predictor_names
-        ], dtype=int)
+        predictor_indices_forecast = numpy.array(
+            [
+                xt.coords[this_coord_name].values.tolist().index(n)
+                for n in forecast_predictor_names
+            ],
+            dtype=int,
+        )
 
     for i in range(num_examples):
         for j in range(num_goes_lag_times):
             if goes_rows_by_example[i] is None:
-                goes_predictor_matrix[i, j, :] = 0.
+                goes_predictor_matrix[i, j, :] = 0.0
                 continue
 
             k = goes_rows_by_example[i][j]
@@ -1194,14 +1216,14 @@ def _read_ships_one_file(
             goes_predictor_matrix[i, j, :] = _ships_goes_xarray_to_keras(
                 example_table_xarray=xt,
                 init_time_index=k,
-                predictor_indices=predictor_indices_goes
+                predictor_indices=predictor_indices_goes,
             )
 
         forecast_predictor_matrix[i, ...] = _ships_forecasts_xarray_to_keras(
             example_table_xarray=xt,
             init_time_index=forecast_row_by_example[i],
             predictor_indices=predictor_indices_forecast,
-            max_forecast_hour=max_forecast_hour
+            max_forecast_hour=max_forecast_hour,
         )
 
     if num_goes_predictors > 0:
@@ -1210,30 +1232,46 @@ def _read_ships_one_file(
         )
 
     if num_forecast_predictors > 0:
-        dummy_times_unix_sec = 6 * HOURS_TO_SECONDS * numpy.linspace(
-            0, num_forecast_hours - 1, num=num_forecast_hours, dtype=int
+        dummy_times_unix_sec = (
+            6
+            * HOURS_TO_SECONDS
+            * numpy.linspace(
+                0, num_forecast_hours - 1, num=num_forecast_hours, dtype=int
+            )
         )
         forecast_predictor_matrix = _interp_missing_times(
-            data_matrix=forecast_predictor_matrix,
-            times_sec=dummy_times_unix_sec
+            data_matrix=forecast_predictor_matrix, times_sec=dummy_times_unix_sec
         )
 
     return combine_ships_predictors(
         ships_goes_predictor_matrix_3d=goes_predictor_matrix,
-        ships_forecast_predictor_matrix_3d=forecast_predictor_matrix
+        ships_forecast_predictor_matrix_3d=forecast_predictor_matrix,
     )
 
 
 def _read_one_example_file(
-        example_file_name, num_examples_desired, num_positive_examples_desired,
-        num_negative_examples_desired, lead_times_hours,
-        satellite_predictor_names, satellite_lag_times_minutes,
-        ships_goes_predictor_names, ships_goes_lag_times_hours,
-        ships_forecast_predictor_names, ships_max_forecast_hour,
-        predict_td_to_ts, satellite_time_tolerance_sec,
-        satellite_max_missing_times, ships_time_tolerance_sec,
-        ships_max_missing_times, use_climo_as_backup, class_cutoffs_m_s01=None,
-        num_grid_rows=None, num_grid_columns=None, init_times_unix_sec=None):
+    example_file_name,
+    num_examples_desired,
+    num_positive_examples_desired,
+    num_negative_examples_desired,
+    lead_times_hours,
+    satellite_predictor_names,
+    satellite_lag_times_minutes,
+    ships_goes_predictor_names,
+    ships_goes_lag_times_hours,
+    ships_forecast_predictor_names,
+    ships_max_forecast_hour,
+    predict_td_to_ts,
+    satellite_time_tolerance_sec,
+    satellite_max_missing_times,
+    ships_time_tolerance_sec,
+    ships_max_missing_times,
+    use_climo_as_backup,
+    class_cutoffs_m_s01=None,
+    num_grid_rows=None,
+    num_grid_columns=None,
+    init_times_unix_sec=None,
+):
     """Reads one example file for generator.
 
     E = number of examples per batch
@@ -1305,9 +1343,7 @@ def _read_one_example_file(
     if satellite_lag_times_minutes is None:
         satellite_lag_times_sec = None
     else:
-        satellite_lag_times_sec = (
-            satellite_lag_times_minutes * MINUTES_TO_SECONDS
-        )
+        satellite_lag_times_sec = satellite_lag_times_minutes * MINUTES_TO_SECONDS
 
     if ships_goes_lag_times_hours is None:
         ships_goes_lag_times_sec = None
@@ -1334,7 +1370,7 @@ def _read_one_example_file(
         ships_max_missing_times=ships_max_missing_times,
         use_climo_as_backup=use_climo_as_backup,
         all_init_times_unix_sec=init_times_unix_sec,
-        class_cutoffs_m_s01=class_cutoffs_m_s01
+        class_cutoffs_m_s01=class_cutoffs_m_s01,
     )
 
     satellite_rows_by_example = data_dict.pop(SATELLITE_ROWS_KEY)
@@ -1342,10 +1378,9 @@ def _read_one_example_file(
     ships_forecast_row_by_example = data_dict.pop(SHIPS_FORECAST_ROWS_KEY)
 
     if (
-            satellite_lag_times_sec is None or
-            satellite_predictor_names is None or
-            satellite_utils.BRIGHTNESS_TEMPERATURE_KEY not in
-            satellite_predictor_names
+        satellite_lag_times_sec is None
+        and satellite_predictor_names is None
+        and satellite_utils.BRIGHTNESS_TEMPERATURE_KEY not in satellite_predictor_names
     ):
         brightness_temp_matrix = None
         grid_latitude_matrix_deg_n = None
@@ -1354,19 +1389,21 @@ def _read_one_example_file(
         (
             brightness_temp_matrix,
             grid_latitude_matrix_deg_n,
-            grid_longitude_matrix_deg_e
+            grid_longitude_matrix_deg_e,
         ) = _read_brightness_temp_one_file(
             example_table_xarray=xt,
             table_rows_by_example=satellite_rows_by_example,
             lag_times_sec=satellite_lag_times_sec,
-            num_grid_rows=num_grid_rows, num_grid_columns=num_grid_columns
+            num_grid_rows=num_grid_rows,
+            num_grid_columns=num_grid_columns,
         )
 
     if satellite_predictor_names is None:
         scalar_predictor_names = None
     else:
         scalar_predictor_names = [
-            n for n in satellite_predictor_names
+            n
+            for n in satellite_predictor_names
             if n != satellite_utils.BRIGHTNESS_TEMPERATURE_KEY
         ]
 
@@ -1380,13 +1417,10 @@ def _read_one_example_file(
             example_table_xarray=xt,
             table_rows_by_example=satellite_rows_by_example,
             lag_times_sec=satellite_lag_times_sec,
-            predictor_names=scalar_predictor_names
+            predictor_names=scalar_predictor_names,
         )
 
-    if (
-            ships_goes_predictor_names is None and
-            ships_forecast_predictor_names is None
-    ):
+    if ships_goes_predictor_names is None and ships_forecast_predictor_names is None:
         ships_predictor_matrix = None
     else:
         ships_predictor_matrix = _read_ships_one_file(
@@ -1396,19 +1430,22 @@ def _read_one_example_file(
             goes_rows_by_example=ships_goes_rows_by_example,
             forecast_predictor_names=ships_forecast_predictor_names,
             max_forecast_hour=ships_max_forecast_hour,
-            forecast_row_by_example=ships_forecast_row_by_example
+            forecast_row_by_example=ships_forecast_row_by_example,
         )
 
     predictor_matrices = [
-        brightness_temp_matrix, satellite_predictor_matrix,
-        ships_predictor_matrix
+        brightness_temp_matrix,
+        satellite_predictor_matrix,
+        ships_predictor_matrix,
     ]
 
-    data_dict.update({
-        PREDICTOR_MATRICES_KEY: predictor_matrices,
-        GRID_LATITUDE_MATRIX_KEY: grid_latitude_matrix_deg_n,
-        GRID_LONGITUDE_MATRIX_KEY: grid_longitude_matrix_deg_e
-    })
+    data_dict.update(
+        {
+            PREDICTOR_MATRICES_KEY: predictor_matrices,
+            GRID_LATITUDE_MATRIX_KEY: grid_latitude_matrix_deg_n,
+            GRID_LONGITUDE_MATRIX_KEY: grid_longitude_matrix_deg_e,
+        }
+    )
 
     return data_dict
 
@@ -1425,9 +1462,7 @@ def _check_generator_args(option_dict):
     option_dict.update(orig_option_dict)
 
     error_checking.assert_is_integer_numpy_array(option_dict[YEARS_KEY])
-    error_checking.assert_is_numpy_array(
-        option_dict[YEARS_KEY], num_dimensions=1
-    )
+    error_checking.assert_is_numpy_array(option_dict[YEARS_KEY], num_dimensions=1)
 
     error_checking.assert_is_integer_numpy_array(option_dict[LEAD_TIMES_KEY])
     error_checking.assert_is_greater_numpy_array(option_dict[LEAD_TIMES_KEY], 0)
@@ -1467,9 +1502,7 @@ def _check_generator_args(option_dict):
         error_checking.assert_is_geq_numpy_array(
             option_dict[SHIPS_GOES_LAG_TIMES_KEY], 0
         )
-        assert numpy.all(
-            numpy.mod(option_dict[SHIPS_GOES_LAG_TIMES_KEY], 6) == 0
-        )
+        assert numpy.all(numpy.mod(option_dict[SHIPS_GOES_LAG_TIMES_KEY], 6) == 0)
 
         error_checking.assert_is_numpy_array(
             option_dict[SHIPS_GOES_LAG_TIMES_KEY], num_dimensions=1
@@ -1479,28 +1512,18 @@ def _check_generator_args(option_dict):
         )[::-1]
 
     if option_dict[SATELLITE_PREDICTORS_KEY] is not None:
-        error_checking.assert_is_string_list(
-            option_dict[SATELLITE_PREDICTORS_KEY]
-        )
+        error_checking.assert_is_string_list(option_dict[SATELLITE_PREDICTORS_KEY])
 
     if option_dict[SHIPS_GOES_PREDICTORS_KEY] is not None:
-        error_checking.assert_is_string_list(
-            option_dict[SHIPS_GOES_PREDICTORS_KEY]
-        )
+        error_checking.assert_is_string_list(option_dict[SHIPS_GOES_PREDICTORS_KEY])
 
     if option_dict[SHIPS_FORECAST_PREDICTORS_KEY] is None:
         option_dict[SHIPS_MAX_FORECAST_HOUR_KEY] = 0
     else:
-        error_checking.assert_is_string_list(
-            option_dict[SHIPS_FORECAST_PREDICTORS_KEY]
-        )
+        error_checking.assert_is_string_list(option_dict[SHIPS_FORECAST_PREDICTORS_KEY])
 
-        error_checking.assert_is_integer(
-            option_dict[SHIPS_MAX_FORECAST_HOUR_KEY]
-        )
-        error_checking.assert_is_geq(
-            option_dict[SHIPS_MAX_FORECAST_HOUR_KEY], 0
-        )
+        error_checking.assert_is_integer(option_dict[SHIPS_MAX_FORECAST_HOUR_KEY])
+        error_checking.assert_is_geq(option_dict[SHIPS_MAX_FORECAST_HOUR_KEY], 0)
         assert numpy.mod(option_dict[SHIPS_MAX_FORECAST_HOUR_KEY], 6) == 0
 
     error_checking.assert_is_integer(option_dict[NUM_POSITIVE_EXAMPLES_KEY])
@@ -1510,9 +1533,8 @@ def _check_generator_args(option_dict):
     error_checking.assert_is_integer(option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY])
     error_checking.assert_is_geq(option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY], 1)
     error_checking.assert_is_greater(
-        option_dict[NUM_POSITIVE_EXAMPLES_KEY] +
-        option_dict[NUM_NEGATIVE_EXAMPLES_KEY],
-        option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY]
+        option_dict[NUM_POSITIVE_EXAMPLES_KEY] + option_dict[NUM_NEGATIVE_EXAMPLES_KEY],
+        option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY],
     )
 
     error_checking.assert_is_boolean(option_dict[PREDICT_TD_TO_TS_KEY])
@@ -1526,7 +1548,7 @@ def _check_generator_args(option_dict):
             option_dict[CLASS_CUTOFFS_KEY], num_dimensions=1
         )
         error_checking.assert_is_greater_numpy_array(
-            numpy.diff(option_dict[CLASS_CUTOFFS_KEY]), 0.
+            numpy.diff(option_dict[CLASS_CUTOFFS_KEY]), 0.0
         )
         assert numpy.all(numpy.isfinite(option_dict[CLASS_CUTOFFS_KEY]))
 
@@ -1543,12 +1565,8 @@ def _check_generator_args(option_dict):
     error_checking.assert_is_boolean(option_dict[USE_TIME_DIFFS_KEY])
     error_checking.assert_is_integer(option_dict[SATELLITE_TIME_TOLERANCE_KEY])
     error_checking.assert_is_geq(option_dict[SATELLITE_TIME_TOLERANCE_KEY], 0)
-    error_checking.assert_is_integer(
-        option_dict[SATELLITE_MAX_MISSING_TIMES_KEY]
-    )
-    error_checking.assert_is_geq(
-        option_dict[SATELLITE_MAX_MISSING_TIMES_KEY], 0
-    )
+    error_checking.assert_is_integer(option_dict[SATELLITE_MAX_MISSING_TIMES_KEY])
+    error_checking.assert_is_geq(option_dict[SATELLITE_MAX_MISSING_TIMES_KEY], 0)
     error_checking.assert_is_integer(option_dict[SHIPS_TIME_TOLERANCE_KEY])
     error_checking.assert_is_geq(option_dict[SHIPS_TIME_TOLERANCE_KEY], 0)
     error_checking.assert_is_integer(option_dict[SHIPS_MAX_MISSING_TIMES_KEY])
@@ -1562,38 +1580,29 @@ def _check_generator_args(option_dict):
         option_dict[DATA_AUG_MAX_TRANS_KEY] = None
 
     if option_dict[DATA_AUG_NUM_ROTATIONS_KEY] > 0:
-        error_checking.assert_is_integer(
-            option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
-        )
-        error_checking.assert_is_greater(
-            option_dict[DATA_AUG_MAX_ROTATION_KEY], 0.
-        )
-        error_checking.assert_is_leq(
-            option_dict[DATA_AUG_MAX_ROTATION_KEY], 180.
-        )
+        error_checking.assert_is_integer(option_dict[DATA_AUG_NUM_ROTATIONS_KEY])
+        error_checking.assert_is_greater(option_dict[DATA_AUG_MAX_ROTATION_KEY], 0.0)
+        error_checking.assert_is_leq(option_dict[DATA_AUG_MAX_ROTATION_KEY], 180.0)
     else:
         option_dict[DATA_AUG_NUM_ROTATIONS_KEY] = 0
         option_dict[DATA_AUG_MAX_ROTATION_KEY] = None
 
     if option_dict[DATA_AUG_NUM_NOISINGS_KEY] > 0:
         error_checking.assert_is_integer(option_dict[DATA_AUG_NUM_NOISINGS_KEY])
-        error_checking.assert_is_greater(
-            option_dict[DATA_AUG_NOISE_STDEV_KEY], 0.
-        )
+        error_checking.assert_is_greater(option_dict[DATA_AUG_NOISE_STDEV_KEY], 0.0)
     else:
         option_dict[DATA_AUG_NUM_NOISINGS_KEY] = 0
         option_dict[DATA_AUG_NOISE_STDEV_KEY] = None
 
     if option_dict[WEST_PACIFIC_WEIGHT_KEY] is not None:
-        error_checking.assert_is_greater(
-            option_dict[WEST_PACIFIC_WEIGHT_KEY], 1.
-        )
+        error_checking.assert_is_greater(option_dict[WEST_PACIFIC_WEIGHT_KEY], 1.0)
 
     return option_dict
 
 
 def _ships_goes_xarray_to_keras(
-        example_table_xarray, init_time_index, predictor_indices):
+    example_table_xarray, init_time_index, predictor_indices
+):
     """Converts SHIPS GOES predictors from xarray format to Keras format.
 
     :param example_table_xarray: xarray table returned by
@@ -1617,16 +1626,22 @@ def _ships_goes_xarray_to_keras(
 
     predictor_values = predictor_values[:, predictor_indices]
 
-    merged_lag_times_index = numpy.where(numpy.isnan(
-        example_table_xarray.coords[example_utils.SHIPS_LAG_TIME_DIM].values
-    ))[0][0]
+    merged_lag_times_index = numpy.where(
+        numpy.isnan(
+            example_table_xarray.coords[example_utils.SHIPS_LAG_TIME_DIM].values
+        )
+    )[0][0]
 
     return predictor_values[merged_lag_times_index, :]
 
 
 def _ships_forecasts_xarray_to_keras(
-        example_table_xarray, init_time_index, predictor_indices,
-        max_forecast_hour, test_mode=False):
+    example_table_xarray,
+    init_time_index,
+    predictor_indices,
+    max_forecast_hour,
+    test_mode=False,
+):
     """Converts SHIPS forecast predictors from xarray format to Keras format.
 
     H = number of forecast hours
@@ -1656,17 +1671,17 @@ def _ships_forecasts_xarray_to_keras(
         xt.coords[example_utils.SHIPS_FORECAST_HOUR_DIM].values == 0
     )[0][0]
 
-    last_index = 1 + numpy.where(
-        xt.coords[example_utils.SHIPS_FORECAST_HOUR_DIM].values ==
-        max_forecast_hour
-    )[0][0]
+    last_index = (
+        1
+        + numpy.where(
+            xt.coords[example_utils.SHIPS_FORECAST_HOUR_DIM].values == max_forecast_hour
+        )[0][0]
+    )
 
     predictor_matrix = xt[example_utils.SHIPS_PREDICTORS_FORECAST_KEY].values[
         init_time_index, ...
     ]
-    predictor_matrix = (
-        predictor_matrix[first_index:last_index, predictor_indices]
-    )
+    predictor_matrix = predictor_matrix[first_index:last_index, predictor_indices]
 
     if test_mode:
         return predictor_matrix
@@ -1676,16 +1691,14 @@ def _ships_forecasts_xarray_to_keras(
             example_utils.SHIPS_PREDICTOR_FORECAST_DIM
         ].values[j]
 
-        if (
-                this_predictor_name not in SHIPS_PREDICTORS_SANS_USABLE_FORECAST
-        ):
+        if this_predictor_name not in SHIPS_PREDICTORS_SANS_USABLE_FORECAST:
             continue
 
-        print((
-            'Cannot use true forecast values for SHIPS predictor "{0:s}".'
-        ).format(
-            this_predictor_name
-        ))
+        print(
+            ('Cannot use true forecast values for SHIPS predictor "{0:s}".').format(
+                this_predictor_name
+            )
+        )
 
         predictor_matrix[:, i] = predictor_matrix[0, i]
 
@@ -1693,11 +1706,19 @@ def _ships_forecasts_xarray_to_keras(
 
 
 def _write_metafile(
-        pickle_file_name, num_epochs, use_crps_loss, quantile_levels,
-        central_loss_function_weight, num_training_batches_per_epoch,
-        training_option_dict, num_validation_batches_per_epoch,
-        validation_option_dict, do_early_stopping, plateau_lr_multiplier,
-        bnn_architecture_dict):
+    pickle_file_name,
+    num_epochs,
+    use_crps_loss,
+    quantile_levels,
+    central_loss_function_weight,
+    num_training_batches_per_epoch,
+    training_option_dict,
+    num_validation_batches_per_epoch,
+    validation_option_dict,
+    do_early_stopping,
+    plateau_lr_multiplier,
+    bnn_architecture_dict,
+):
     """Writes metadata to Pickle file.
 
     :param pickle_file_name: Path to output file.
@@ -1725,12 +1746,12 @@ def _write_metafile(
         VALIDATION_OPTIONS_KEY: validation_option_dict,
         EARLY_STOPPING_KEY: do_early_stopping,
         PLATEAU_LR_MUTIPLIER_KEY: plateau_lr_multiplier,
-        BNN_ARCHITECTURE_KEY: bnn_architecture_dict
+        BNN_ARCHITECTURE_KEY: bnn_architecture_dict,
     }
 
     file_system_utils.mkdir_recursive_if_necessary(file_name=pickle_file_name)
 
-    pickle_file_handle = open(pickle_file_name, 'wb')
+    pickle_file_handle = open(pickle_file_name, "wb")
     pickle.dump(metadata_dict, pickle_file_handle)
     pickle_file_handle.close()
 
@@ -1778,30 +1799,35 @@ def find_metafile(model_file_name, raise_error_if_missing=True):
     """
 
     error_checking.assert_is_string(model_file_name)
-    model_file_name = model_file_name.split(' ')[0]  # TODO(thunderhoser): HACK for ensembles.
+    model_file_name = model_file_name.split(" ")[
+        0
+    ]  # TODO(thunderhoser): HACK for ensembles.
     error_checking.assert_is_boolean(raise_error_if_missing)
 
-    metafile_name = '{0:s}/model_metadata.p'.format(
-        os.path.split(model_file_name)[0]
-    )
+    metafile_name = "{0:s}/model_metadata.p".format(os.path.split(model_file_name)[0])
 
     if raise_error_if_missing and not os.path.isfile(metafile_name):
         metafile_name = metafile_name.replace(
-            '/home/ralager/condo/swatwork/ralager', ''
+            "/home/ralager/condo/swatwork/ralager", ""
         )
 
     if raise_error_if_missing and not os.path.isfile(metafile_name):
-        error_string = 'Cannot find file.  Expected at: "{0:s}"'.format(
-            metafile_name
-        )
+        error_string = 'Cannot find file.  Expected at: "{0:s}"'.format(metafile_name)
         raise ValueError(error_string)
 
     return metafile_name
 
 
 def _augment_data(
-        predictor_matrices, target_array, num_translations, max_translation_px,
-        num_rotations, max_rotation_deg, num_noisings, noise_stdev):
+    predictor_matrices,
+    target_array,
+    num_translations,
+    max_translation_px,
+    num_rotations,
+    max_rotation_deg,
+    num_noisings,
+    noise_stdev,
+):
     """Performs data augmentation.
 
     This method applies each augmentation separately.  For example, a satellite
@@ -1841,12 +1867,14 @@ def _augment_data(
             num_translations=num_translations,
             max_translation_pixels=max_translation_px,
             num_grid_rows=predictor_matrices[0].shape[1],
-            num_grid_columns=predictor_matrices[0].shape[2]
+            num_grid_columns=predictor_matrices[0].shape[2],
         )
 
-        print('Applying {0:d} translations for DATA AUGMENTATION...'.format(
-            num_translations
-        ))
+        print(
+            "Applying {0:d} translations for DATA AUGMENTATION...".format(
+                num_translations
+            )
+        )
     else:
         x_offsets_px = numpy.array([])
         y_offsets_px = numpy.array([])
@@ -1855,7 +1883,7 @@ def _augment_data(
         this_matrix = data_augmentation.shift_radar_images(
             radar_image_matrix=predictor_matrices[0][:orig_num_examples, ...],
             x_offset_pixels=x_offsets_px[k],
-            y_offset_pixels=y_offsets_px[k]
+            y_offset_pixels=y_offsets_px[k],
         )
 
         predictor_matrices[0] = numpy.concatenate(
@@ -1866,27 +1894,25 @@ def _augment_data(
         )
 
         for j in range(1, num_matrices):
-            predictor_matrices[j] = numpy.concatenate((
-                predictor_matrices[j],
-                predictor_matrices[j][:orig_num_examples, ...]
-            ), axis=0)
+            predictor_matrices[j] = numpy.concatenate(
+                (predictor_matrices[j], predictor_matrices[j][:orig_num_examples, ...]),
+                axis=0,
+            )
 
     if num_rotations > 0:
         rotation_angles_deg = data_augmentation.get_rotations(
             num_rotations=num_rotations,
-            max_absolute_rotation_angle_deg=max_rotation_deg
+            max_absolute_rotation_angle_deg=max_rotation_deg,
         )
 
-        print('Applying {0:d} rotations for DATA AUGMENTATION...'.format(
-            num_rotations
-        ))
+        print("Applying {0:d} rotations for DATA AUGMENTATION...".format(num_rotations))
     else:
         rotation_angles_deg = numpy.array([])
 
     for k in range(num_rotations):
         this_matrix = data_augmentation.rotate_radar_images(
             radar_image_matrix=predictor_matrices[0][:orig_num_examples, ...],
-            ccw_rotation_angle_deg=rotation_angles_deg[k]
+            ccw_rotation_angle_deg=rotation_angles_deg[k],
         )
 
         predictor_matrices[0] = numpy.concatenate(
@@ -1897,25 +1923,22 @@ def _augment_data(
         )
 
         for j in range(1, num_matrices):
-            predictor_matrices[j] = numpy.concatenate((
-                predictor_matrices[j],
-                predictor_matrices[j][:orig_num_examples, ...]
-            ), axis=0)
+            predictor_matrices[j] = numpy.concatenate(
+                (predictor_matrices[j], predictor_matrices[j][:orig_num_examples, ...]),
+                axis=0,
+            )
 
     if num_noisings > 0:
-        print('Applying {0:d} noisings for DATA AUGMENTATION...'.format(
-            num_noisings
-        ))
+        print("Applying {0:d} noisings for DATA AUGMENTATION...".format(num_noisings))
 
     for k in range(num_noisings):
         for j in range(num_matrices):
             this_matrix = numpy.random.normal(
-                loc=0., scale=noise_stdev,
-                size=predictor_matrices[j][:orig_num_examples, ...].shape
+                loc=0.0,
+                scale=noise_stdev,
+                size=predictor_matrices[j][:orig_num_examples, ...].shape,
             )
-            this_matrix = (
-                this_matrix + predictor_matrices[j][:orig_num_examples, ...]
-            )
+            this_matrix = this_matrix + predictor_matrices[j][:orig_num_examples, ...]
             predictor_matrices[j] = numpy.concatenate(
                 (predictor_matrices[j], this_matrix), axis=0
             )
@@ -1928,8 +1951,8 @@ def _augment_data(
 
 
 def _apply_model_td_to_ts(
-        model_object, predictor_matrices, num_examples_per_batch,
-        use_dropout, verbose):
+    model_object, predictor_matrices, num_examples_per_batch, use_dropout, verbose
+):
     """Applies trained model (inference mode) for TD-to-TS prediction.
 
     :param model_object: See doc for `apply_model`.
@@ -1945,23 +1968,21 @@ def _apply_model_td_to_ts(
 
     for i in range(0, num_examples, num_examples_per_batch):
         first_index = i
-        last_index = min([
-            i + num_examples_per_batch - 1, num_examples - 1
-        ])
+        last_index = min([i + num_examples_per_batch - 1, num_examples - 1])
         these_indices = numpy.linspace(
-            first_index, last_index,
-            num=last_index - first_index + 1, dtype=int
+            first_index, last_index, num=last_index - first_index + 1, dtype=int
         )
 
         if verbose:
-            print('Applying model to examples {0:d}-{1:d} of {2:d}...'.format(
-                first_index + 1, last_index + 1, num_examples
-            ))
+            print(
+                "Applying model to examples {0:d}-{1:d} of {2:d}...".format(
+                    first_index + 1, last_index + 1, num_examples
+                )
+            )
 
         if use_dropout:
             this_prob_matrix = model_object(
-                [a[these_indices, ...] for a in predictor_matrices],
-                training=True
+                [a[these_indices, ...] for a in predictor_matrices], training=True
             ).numpy()
         else:
             this_prob_matrix = model_object.predict_on_batch(
@@ -1970,7 +1991,7 @@ def _apply_model_td_to_ts(
 
         this_prob_matrix = numpy.expand_dims(this_prob_matrix, axis=-3)
         this_prob_matrix = numpy.concatenate(
-            (1. - this_prob_matrix, this_prob_matrix), axis=-3
+            (1.0 - this_prob_matrix, this_prob_matrix), axis=-3
         )
 
         if forecast_prob_matrix is None:
@@ -1980,14 +2001,14 @@ def _apply_model_td_to_ts(
         forecast_prob_matrix[these_indices, ...] = this_prob_matrix
 
     if verbose:
-        print('Have applied model to all {0:d} examples!'.format(num_examples))
+        print("Have applied model to all {0:d} examples!".format(num_examples))
 
     return forecast_prob_matrix
 
 
 def _apply_model_ri(
-        model_object, predictor_matrices, num_examples_per_batch,
-        use_dropout, verbose):
+    model_object, predictor_matrices, num_examples_per_batch, use_dropout, verbose
+):
     """Applies trained model (inference mode) for rapid intensification.
 
     :param model_object: See doc for `apply_model`.
@@ -2003,23 +2024,21 @@ def _apply_model_ri(
 
     for i in range(0, num_examples, num_examples_per_batch):
         first_index = i
-        last_index = min([
-            i + num_examples_per_batch - 1, num_examples - 1
-        ])
+        last_index = min([i + num_examples_per_batch - 1, num_examples - 1])
         these_indices = numpy.linspace(
-            first_index, last_index,
-            num=last_index - first_index + 1, dtype=int
+            first_index, last_index, num=last_index - first_index + 1, dtype=int
         )
 
         if verbose:
-            print('Applying model to examples {0:d}-{1:d} of {2:d}...'.format(
-                first_index + 1, last_index + 1, num_examples
-            ))
+            print(
+                "Applying model to examples {0:d}-{1:d} of {2:d}...".format(
+                    first_index + 1, last_index + 1, num_examples
+                )
+            )
 
         if use_dropout:
             these_predictions = model_object(
-                [a[these_indices, ...] for a in predictor_matrices],
-                training=True
+                [a[these_indices, ...] for a in predictor_matrices], training=True
             ).numpy()
         else:
             these_predictions = model_object.predict_on_batch(
@@ -2035,7 +2054,7 @@ def _apply_model_ri(
             if len(this_prob_matrix.shape) == 2:
                 this_prob_matrix = numpy.expand_dims(this_prob_matrix, axis=-2)
                 this_prob_matrix = numpy.concatenate(
-                    (1. - this_prob_matrix, this_prob_matrix), axis=-2
+                    (1.0 - this_prob_matrix, this_prob_matrix), axis=-2
                 )
 
             # Add lead-time axis to get shape E x K x L x S.
@@ -2043,13 +2062,13 @@ def _apply_model_ri(
         else:
 
             # Current shape is E x L x S or E x K x L x S.
-            this_prob_matrix = these_predictions + 0.
+            this_prob_matrix = these_predictions + 0.0
 
             # Make sure that shape is E x K x L x S.
             if len(this_prob_matrix.shape) == 3:
                 this_prob_matrix = numpy.expand_dims(this_prob_matrix, axis=-3)
                 this_prob_matrix = numpy.concatenate(
-                    (1. - this_prob_matrix, this_prob_matrix), axis=-3
+                    (1.0 - this_prob_matrix, this_prob_matrix), axis=-3
                 )
 
         if forecast_prob_matrix is None:
@@ -2059,7 +2078,7 @@ def _apply_model_ri(
         forecast_prob_matrix[these_indices, ...] = this_prob_matrix
 
     if verbose:
-        print('Have applied model to all {0:d} examples!'.format(num_examples))
+        print("Have applied model to all {0:d} examples!".format(num_examples))
 
     return forecast_prob_matrix
 
@@ -2086,7 +2105,7 @@ def read_metafile(pickle_file_name):
 
     error_checking.assert_file_exists(pickle_file_name)
 
-    pickle_file_handle = open(pickle_file_name, 'rb')
+    pickle_file_handle = open(pickle_file_name, "rb")
     metadata_dict = pickle.load(pickle_file_handle)
     pickle_file_handle.close()
 
@@ -2098,15 +2117,15 @@ def read_metafile(pickle_file_name):
         return metadata_dict
 
     error_string = (
-        '\n{0:s}\nKeys listed above were expected, but not found, in file '
-        '"{1:s}".'
+        "\n{0:s}\nKeys listed above were expected, but not found, in file " '"{1:s}".'
     ).format(str(missing_keys), pickle_file_name)
 
     raise ValueError(error_string)
 
 
-def combine_ships_predictors(ships_goes_predictor_matrix_3d,
-                             ships_forecast_predictor_matrix_3d):
+def combine_ships_predictors(
+    ships_goes_predictor_matrix_3d, ships_forecast_predictor_matrix_3d
+):
     """Combines SHIPS predictors into one matrix.
 
     E = number of examples
@@ -2126,47 +2145,46 @@ def combine_ships_predictors(ships_goes_predictor_matrix_3d,
     error_checking.assert_is_numpy_array(
         ships_goes_predictor_matrix_3d, num_dimensions=3
     )
-    error_checking.assert_is_numpy_array_without_nan(
-        ships_goes_predictor_matrix_3d
-    )
+    error_checking.assert_is_numpy_array_without_nan(ships_goes_predictor_matrix_3d)
 
     error_checking.assert_is_numpy_array(
         ships_forecast_predictor_matrix_3d, num_dimensions=3
     )
-    error_checking.assert_is_numpy_array_without_nan(
-        ships_forecast_predictor_matrix_3d
-    )
+    error_checking.assert_is_numpy_array_without_nan(ships_forecast_predictor_matrix_3d)
 
     error_checking.assert_equals(
         ships_goes_predictor_matrix_3d.shape[0],
-        ships_forecast_predictor_matrix_3d.shape[0]
+        ships_forecast_predictor_matrix_3d.shape[0],
     )
 
     num_examples = ships_goes_predictor_matrix_3d.shape[0]
     this_second_dim = (
-        ships_goes_predictor_matrix_3d.shape[1] *
-        ships_goes_predictor_matrix_3d.shape[2]
+        ships_goes_predictor_matrix_3d.shape[1]
+        * ships_goes_predictor_matrix_3d.shape[2]
     )
     ships_goes_predictor_matrix_2d = numpy.reshape(
         ships_goes_predictor_matrix_3d, (num_examples, this_second_dim)
     )
 
     this_second_dim = (
-        ships_forecast_predictor_matrix_3d.shape[1] *
-        ships_forecast_predictor_matrix_3d.shape[2]
+        ships_forecast_predictor_matrix_3d.shape[1]
+        * ships_forecast_predictor_matrix_3d.shape[2]
     )
     ships_forecast_predictor_matrix_2d = numpy.reshape(
         ships_forecast_predictor_matrix_3d, (num_examples, this_second_dim)
     )
 
     return numpy.concatenate(
-        (ships_goes_predictor_matrix_2d, ships_forecast_predictor_matrix_2d),
-        axis=1
+        (ships_goes_predictor_matrix_2d, ships_forecast_predictor_matrix_2d), axis=1
     )
 
 
-def separate_ships_predictors(ships_predictor_matrix_2d, num_goes_predictors,
-                              num_forecast_predictors, num_forecast_hours):
+def separate_ships_predictors(
+    ships_predictor_matrix_2d,
+    num_goes_predictors,
+    num_forecast_predictors,
+    num_forecast_hours,
+):
     """Separates SHIPS predictors into two matrices.
 
     This method is the inverse of `combine_ships_predictors`.
@@ -2180,9 +2198,7 @@ def separate_ships_predictors(ships_predictor_matrix_2d, num_goes_predictors,
     :return: ships_forecast_predictor_matrix_3d: Same.
     """
 
-    error_checking.assert_is_numpy_array(
-        ships_predictor_matrix_2d, num_dimensions=2
-    )
+    error_checking.assert_is_numpy_array(ships_predictor_matrix_2d, num_dimensions=2)
     error_checking.assert_is_numpy_array_without_nan(ships_predictor_matrix_2d)
 
     error_checking.assert_is_integer(num_goes_predictors)
@@ -2195,29 +2211,27 @@ def separate_ships_predictors(ships_predictor_matrix_2d, num_goes_predictors,
     num_examples = ships_predictor_matrix_2d.shape[0]
 
     if num_goes_predictors == 0:
-        ships_goes_predictor_matrix_3d = numpy.full((num_examples, 0, 0), 0.)
+        ships_goes_predictor_matrix_3d = numpy.full((num_examples, 0, 0), 0.0)
         num_goes_entries = 0
     else:
         num_entries = ships_predictor_matrix_2d.shape[1]
         num_forecast_entries = num_forecast_predictors * num_forecast_hours
         num_goes_entries = num_entries - num_forecast_entries
-        num_goes_lag_times = int(numpy.round(
-            float(num_goes_entries) / num_goes_predictors
-        ))
+        num_goes_lag_times = int(
+            numpy.round(float(num_goes_entries) / num_goes_predictors)
+        )
 
         ships_goes_predictor_matrix_3d = numpy.reshape(
             ships_predictor_matrix_2d[:, :num_goes_entries],
-            (num_examples, num_goes_lag_times, num_goes_predictors)
+            (num_examples, num_goes_lag_times, num_goes_predictors),
         )
 
     if num_forecast_predictors + num_forecast_hours == 0:
-        ships_forecast_predictor_matrix_3d = numpy.full(
-            (num_examples, 0, 0), 0.
-        )
+        ships_forecast_predictor_matrix_3d = numpy.full((num_examples, 0, 0), 0.0)
     else:
         ships_forecast_predictor_matrix_3d = numpy.reshape(
             ships_predictor_matrix_2d[:, num_goes_entries:],
-            (num_examples, num_forecast_hours, num_forecast_predictors)
+            (num_examples, num_forecast_hours, num_forecast_predictors),
         )
 
     return ships_goes_predictor_matrix_3d, ships_forecast_predictor_matrix_3d
@@ -2253,7 +2267,7 @@ def create_inputs(option_dict):
     :return: data_dict: See doc for `_read_one_example_file`.
     """
 
-    option_dict[EXAMPLE_DIRECTORY_KEY] = 'foo'
+    option_dict[EXAMPLE_DIRECTORY_KEY] = "foo"
     option_dict[YEARS_KEY] = numpy.array([1900], dtype=int)
     option_dict[NUM_POSITIVE_EXAMPLES_KEY] = 8
     option_dict[NUM_NEGATIVE_EXAMPLES_KEY] = 8
@@ -2299,26 +2313,26 @@ def create_inputs(option_dict):
         ships_max_missing_times=ships_max_missing_times,
         use_climo_as_backup=use_climo_as_backup,
         class_cutoffs_m_s01=class_cutoffs_m_s01,
-        num_grid_rows=num_grid_rows, num_grid_columns=num_grid_columns
+        num_grid_rows=num_grid_rows,
+        num_grid_columns=num_grid_columns,
     )
 
     data_dict[PREDICTOR_MATRICES_KEY] = [
-        None if m is None else m.astype('float16')
+        None if m is None else m.astype("float16")
         for m in data_dict[PREDICTOR_MATRICES_KEY]
     ]
 
     if (
-            use_time_diffs_gridded_sat and
-            satellite_predictor_names is not None and
-            satellite_utils.BRIGHTNESS_TEMPERATURE_KEY
-            in satellite_predictor_names
+        use_time_diffs_gridded_sat
+        and satellite_predictor_names is not None
+        and satellite_utils.BRIGHTNESS_TEMPERATURE_KEY in satellite_predictor_names
     ):
         num_lag_times = len(satellite_lag_times_minutes)
 
         for j in range(num_lag_times - 1):
             data_dict[PREDICTOR_MATRICES_KEY][0][..., j, 0] = (
-                data_dict[PREDICTOR_MATRICES_KEY][0][..., -1, 0] -
-                data_dict[PREDICTOR_MATRICES_KEY][0][..., j, 0]
+                data_dict[PREDICTOR_MATRICES_KEY][0][..., -1, 0]
+                - data_dict[PREDICTOR_MATRICES_KEY][0][..., j, 0]
             )
 
     return data_dict
@@ -2424,9 +2438,7 @@ def input_generator(option_dict):
     ships_max_forecast_hour = option_dict[SHIPS_MAX_FORECAST_HOUR_KEY]
     num_positive_examples_per_batch = option_dict[NUM_POSITIVE_EXAMPLES_KEY]
     num_negative_examples_per_batch = option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
-    max_examples_per_cyclone_in_batch = (
-        option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY]
-    )
+    max_examples_per_cyclone_in_batch = option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY]
     predict_td_to_ts = option_dict[PREDICT_TD_TO_TS_KEY]
     satellite_time_tolerance_sec = option_dict[SATELLITE_TIME_TOLERANCE_KEY]
     satellite_max_missing_times = option_dict[SATELLITE_MAX_MISSING_TIMES_KEY]
@@ -2446,9 +2458,7 @@ def input_generator(option_dict):
     west_pacific_weight = option_dict[WEST_PACIFIC_WEIGHT_KEY]
 
     use_data_augmentation = (
-        data_aug_num_translations + data_aug_num_rotations +
-        data_aug_num_noisings
-        > 0
+        data_aug_num_translations + data_aug_num_rotations + data_aug_num_noisings > 0
     )
 
     # Do actual stuff.
@@ -2456,8 +2466,7 @@ def input_generator(option_dict):
         directory_name=example_dir_name, raise_error_if_all_missing=True
     )
     cyclone_years = numpy.array(
-        [satellite_utils.parse_cyclone_id(c)[0] for c in cyclone_id_strings],
-        dtype=int
+        [satellite_utils.parse_cyclone_id(c)[0] for c in cyclone_id_strings], dtype=int
     )
     good_flags = numpy.array([y in years for y in cyclone_years], dtype=bool)
     good_indices = numpy.where(good_flags)[0]
@@ -2466,9 +2475,11 @@ def input_generator(option_dict):
 
     example_file_names = [
         example_io.find_file(
-            directory_name=example_dir_name, cyclone_id_string=c,
-            prefer_zipped=False, allow_other_format=False,
-            raise_error_if_missing=True
+            directory_name=example_dir_name,
+            cyclone_id_string=c,
+            prefer_zipped=False,
+            allow_other_format=False,
+            raise_error_if_missing=True,
         )
         for c in cyclone_id_strings
     ]
@@ -2480,7 +2491,7 @@ def input_generator(option_dict):
     )
 
     # TODO(thunderhoser): This is a HACK to allow no-oversampling.
-    num_examples_per_batch = min([num_examples_per_batch, 16])
+    # num_examples_per_batch = min([num_examples_per_batch, 16])
 
     while True:
         predictor_matrices = None
@@ -2494,20 +2505,24 @@ def input_generator(option_dict):
             if file_index == len(example_file_names):
                 file_index = 0
 
-            num_positive_examples_to_read = min([
-                max_examples_per_cyclone_in_batch,
-                num_positive_examples_per_batch -
-                num_positive_examples_in_memory
-            ])
-            num_negative_examples_to_read = min([
-                max_examples_per_cyclone_in_batch,
-                num_negative_examples_per_batch -
-                num_negative_examples_in_memory
-            ])
-            num_examples_to_read = min([
-                max_examples_per_cyclone_in_batch,
-                num_examples_per_batch - num_examples_in_memory
-            ])
+            num_positive_examples_to_read = min(
+                [
+                    max_examples_per_cyclone_in_batch,
+                    num_positive_examples_per_batch - num_positive_examples_in_memory,
+                ]
+            )
+            num_negative_examples_to_read = min(
+                [
+                    max_examples_per_cyclone_in_batch,
+                    num_negative_examples_per_batch - num_negative_examples_in_memory,
+                ]
+            )
+            num_examples_to_read = min(
+                [
+                    max_examples_per_cyclone_in_batch,
+                    num_examples_per_batch - num_examples_in_memory,
+                ]
+            )
 
             this_data_dict = _read_one_example_file(
                 example_file_name=example_file_names[file_index],
@@ -2528,13 +2543,12 @@ def input_generator(option_dict):
                 ships_max_missing_times=ships_max_missing_times,
                 use_climo_as_backup=use_climo_as_backup,
                 class_cutoffs_m_s01=class_cutoffs_m_s01,
-                num_grid_rows=num_grid_rows, num_grid_columns=num_grid_columns,
-                init_times_unix_sec=init_times_by_file_unix_sec[file_index]
+                num_grid_rows=num_grid_rows,
+                num_grid_columns=num_grid_columns,
+                init_times_unix_sec=init_times_by_file_unix_sec[file_index],
             )
 
-            init_times_by_file_unix_sec[file_index] = (
-                this_data_dict[INIT_TIMES_KEY]
-            )
+            init_times_by_file_unix_sec[file_index] = this_data_dict[INIT_TIMES_KEY]
             this_cyclone_id_string = example_io.file_name_to_cyclone_id(
                 example_file_names[file_index]
             )
@@ -2545,8 +2559,7 @@ def input_generator(option_dict):
                 continue
 
             these_predictor_matrices = [
-                m for m in this_data_dict[PREDICTOR_MATRICES_KEY]
-                if m is not None
+                m for m in this_data_dict[PREDICTOR_MATRICES_KEY] if m is not None
             ]
 
             if predict_td_to_ts:
@@ -2556,18 +2569,30 @@ def input_generator(option_dict):
             else:
                 this_target_array = this_target_class_matrix[:, 0, -1]
 
+            this_storm_id_array = numpy.array(
+                [this_cyclone_id_string] * this_target_array.shape[0]
+            )
+            this_init_times_array = numpy.array(this_data_dict[INIT_TIMES_KEY])
+
             if predictor_matrices is None:
                 predictor_matrices = copy.deepcopy(these_predictor_matrices)
                 target_array = this_target_array + 0
+                storm_id_array = this_storm_id_array
+                init_times_array = this_init_times_array
             else:
                 for j in range(len(predictor_matrices)):
                     predictor_matrices[j] = numpy.concatenate(
-                        (predictor_matrices[j], these_predictor_matrices[j]),
-                        axis=0
+                        (predictor_matrices[j], these_predictor_matrices[j]), axis=0
                     )
 
                 target_array = numpy.concatenate(
                     (target_array, this_target_array), axis=0
+                )
+                storm_id_array = numpy.concatenate(
+                    (storm_id_array, this_storm_id_array), axis=0
+                )
+                init_times_array = numpy.concatenate(
+                    (init_times_array, this_init_times_array), axis=0
                 )
 
             if predict_td_to_ts:
@@ -2579,32 +2604,28 @@ def input_generator(option_dict):
                 )
             elif len(class_cutoffs_m_s01) > 1:
                 num_positive_examples_in_memory = numpy.sum(target_array[:, -1])
-                num_negative_examples_in_memory = numpy.sum(
-                    target_array[:, :-1]
-                )
+                num_negative_examples_in_memory = numpy.sum(target_array[:, :-1])
             else:
                 num_positive_examples_in_memory = numpy.sum(target_array == 1)
                 num_negative_examples_in_memory = numpy.sum(target_array == 0)
 
             num_examples_in_memory = (
-                num_positive_examples_in_memory +
-                num_negative_examples_in_memory
+                num_positive_examples_in_memory + num_negative_examples_in_memory
             )
 
             if west_pacific_weight is None:
                 continue
 
             this_flag = (
-                satellite_utils.parse_cyclone_id(this_cyclone_id_string)[1] ==
-                satellite_utils.NORTHWEST_PACIFIC_ID_STRING
+                satellite_utils.parse_cyclone_id(this_cyclone_id_string)[1]
+                == satellite_utils.NORTHWEST_PACIFIC_ID_STRING
             )
             these_sample_weights = numpy.full(
-                this_target_array.shape[0],
-                west_pacific_weight if this_flag else 1.
+                this_target_array.shape[0], west_pacific_weight if this_flag else 1.0
             )
 
             if sample_weights is None:
-                sample_weights = these_sample_weights + 0.
+                sample_weights = these_sample_weights + 0.0
             else:
                 sample_weights = numpy.concatenate(
                     (sample_weights, these_sample_weights), axis=0
@@ -2621,67 +2642,72 @@ def input_generator(option_dict):
                 num_rotations=data_aug_num_rotations,
                 max_rotation_deg=data_aug_max_rotation_deg,
                 num_noisings=data_aug_num_noisings,
-                noise_stdev=data_aug_noise_stdev
+                noise_stdev=data_aug_noise_stdev,
             )
 
             if west_pacific_weight is not None:
-                num_repeats = int(numpy.round(
-                    float(target_array.shape[0]) / num_examples_before_da
-                ))
+                num_repeats = int(
+                    numpy.round(float(target_array.shape[0]) / num_examples_before_da)
+                )
                 sample_weights = numpy.tile(sample_weights, reps=num_repeats)
 
         if (
-                use_time_diffs_gridded_sat and
-                satellite_predictor_names is not None and
-                satellite_utils.BRIGHTNESS_TEMPERATURE_KEY
-                in satellite_predictor_names
+            use_time_diffs_gridded_sat
+            and satellite_predictor_names is not None
+            and satellite_utils.BRIGHTNESS_TEMPERATURE_KEY in satellite_predictor_names
         ):
             num_lag_times = len(satellite_lag_times_minutes)
 
             for j in range(num_lag_times - 1):
                 predictor_matrices[0][..., j, 0] = (
-                    predictor_matrices[0][..., -1, 0] -
-                    predictor_matrices[0][..., j, 0]
+                    predictor_matrices[0][..., -1, 0] - predictor_matrices[0][..., j, 0]
                 )
 
-        predictor_matrices = [p.astype('float16') for p in predictor_matrices]
-        target_array = target_array.astype('float16')
+        predictor_matrices = [p.astype("float16") for p in predictor_matrices]
+        target_array = target_array.astype("float16")
 
         if predict_td_to_ts:
-            print((
-                'Yielding {0:d} examples with {1:d} positive examples!'
-            ).format(
-                target_array.shape[0],
-                numpy.sum(numpy.any(target_array == 1, axis=1))
-            ))
+            print(
+                ("Yielding {0:d} examples with {1:d} positive examples!").format(
+                    target_array.shape[0],
+                    numpy.sum(numpy.any(target_array == 1, axis=1)),
+                )
+            )
         elif len(class_cutoffs_m_s01) > 1:
-            print((
-                'Yielding {0:d} examples with the following class distribution:'
-                '\n{1:s}'
-            ).format(
-                target_array.shape[0], str(numpy.sum(target_array, axis=0))
-            ))
+            print(
+                (
+                    "Yielding {0:d} examples with the following class distribution:"
+                    "\n{1:s}"
+                ).format(target_array.shape[0], str(numpy.sum(target_array, axis=0)))
+            )
         else:
-            print((
-                'Yielding {0:d} examples with {1:d} positive examples!'
-            ).format(
-                target_array.shape[0], numpy.sum(target_array == 1)
-            ))
+            print(
+                ("Yielding {0:d} examples with {1:d} positive examples!").format(
+                    target_array.shape[0], numpy.sum(target_array == 1)
+                )
+            )
 
         if west_pacific_weight is None:
-            yield predictor_matrices, target_array
-
-        yield predictor_matrices, target_array, sample_weights
+            yield predictor_matrices[0], target_array, storm_id_array, init_times_array
+        else:
+            yield predictor_matrices, target_array, sample_weights
 
 
 def train_model(
-        model_object, output_dir_name, num_epochs,
-        num_training_batches_per_epoch, training_option_dict,
-        num_validation_batches_per_epoch, validation_option_dict,
-        use_crps_loss, bnn_architecture_dict,
-        do_early_stopping=True, quantile_levels=None,
-        central_loss_function_weight=None,
-        plateau_lr_multiplier=DEFAULT_LEARNING_RATE_MULTIPLIER):
+    model_object,
+    output_dir_name,
+    num_epochs,
+    num_training_batches_per_epoch,
+    training_option_dict,
+    num_validation_batches_per_epoch,
+    validation_option_dict,
+    use_crps_loss,
+    bnn_architecture_dict,
+    do_early_stopping=True,
+    quantile_levels=None,
+    central_loss_function_weight=None,
+    plateau_lr_multiplier=DEFAULT_LEARNING_RATE_MULTIPLIER,
+):
     """Trains neural net.
 
     :param model_object: Untrained neural net (instance of `keras.models.Model`
@@ -2719,9 +2745,7 @@ def train_model(
         performance.
     """
 
-    file_system_utils.mkdir_recursive_if_necessary(
-        directory_name=output_dir_name
-    )
+    file_system_utils.mkdir_recursive_if_necessary(directory_name=output_dir_name)
 
     error_checking.assert_is_integer(num_epochs)
     error_checking.assert_is_geq(num_epochs, 2)
@@ -2733,24 +2757,24 @@ def train_model(
     error_checking.assert_is_boolean(do_early_stopping)
 
     if do_early_stopping:
-        error_checking.assert_is_greater(plateau_lr_multiplier, 0.)
-        error_checking.assert_is_less_than(plateau_lr_multiplier, 1.)
+        error_checking.assert_is_greater(plateau_lr_multiplier, 0.0)
+        error_checking.assert_is_less_than(plateau_lr_multiplier, 1.0)
 
     if quantile_levels is not None:
         error_checking.assert_is_numpy_array(quantile_levels, num_dimensions=1)
-        error_checking.assert_is_greater_numpy_array(quantile_levels, 0.)
-        error_checking.assert_is_less_than_numpy_array(quantile_levels, 1.)
-        error_checking.assert_is_greater_numpy_array(
-            numpy.diff(quantile_levels), 0.
-        )
+        error_checking.assert_is_greater_numpy_array(quantile_levels, 0.0)
+        error_checking.assert_is_less_than_numpy_array(quantile_levels, 1.0)
+        error_checking.assert_is_greater_numpy_array(numpy.diff(quantile_levels), 0.0)
 
-        error_checking.assert_is_geq(central_loss_function_weight, 1.)
+        error_checking.assert_is_geq(central_loss_function_weight, 1.0)
 
     training_option_dict = _check_generator_args(training_option_dict)
 
     validation_keys_to_keep = [
-        EXAMPLE_DIRECTORY_KEY, YEARS_KEY,
-        SATELLITE_TIME_TOLERANCE_KEY, SHIPS_TIME_TOLERANCE_KEY
+        EXAMPLE_DIRECTORY_KEY,
+        YEARS_KEY,
+        SATELLITE_TIME_TOLERANCE_KEY,
+        SHIPS_TIME_TOLERANCE_KEY,
     ]
     for this_key in list(training_option_dict.keys()):
         if this_key in validation_keys_to_keep:
@@ -2758,20 +2782,14 @@ def train_model(
 
         validation_option_dict[this_key] = training_option_dict[this_key]
 
-    num_data_augmentations = (
-        training_option_dict[DATA_AUG_NUM_TRANS_KEY] +
-        training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY] +
-        training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
-    )
-    validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY] *= (
-        1 + num_data_augmentations
-    )
-    validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY] *= (
-        1 + num_data_augmentations
-    )
-    validation_option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY] *= (
-        1 + num_data_augmentations
-    )
+    # num_data_augmentations = (
+    # training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+    # + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+    # + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+    # )
+    # validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY] *= 1 + num_data_augmentations
+    # validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY] *= 1 + num_data_augmentations
+    # validation_option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY] *= 1 + num_data_augmentations
 
     validation_option_dict[SATELLITE_MAX_MISSING_TIMES_KEY] = int(1e10)
     validation_option_dict[SHIPS_MAX_MISSING_TIMES_KEY] = int(1e10)
@@ -2781,34 +2799,113 @@ def train_model(
 
     validation_option_dict = _check_generator_args(validation_option_dict)
 
-    model_file_name = '{0:s}/model.h5'.format(output_dir_name)
+    model_file_name = "{0:s}/model.keras".format(output_dir_name)
 
     history_object = keras.callbacks.CSVLogger(
-        filename='{0:s}/history.csv'.format(output_dir_name),
-        separator=',', append=False
+        filename="{0:s}/history.csv".format(output_dir_name),
+        separator=",",
+        append=False,
     )
     checkpoint_object = keras.callbacks.ModelCheckpoint(
-        filepath=model_file_name, monitor='val_loss', verbose=1,
-        save_best_only=True, save_weights_only=False, mode='min', period=1
+        filepath=model_file_name,
+        monitor="val_loss",
+        verbose=1,
+        save_best_only=True,
+        save_weights_only=False,
+        mode="min",
+        save_freq="epoch",
     )
     list_of_callback_objects = [history_object, checkpoint_object]
 
     if do_early_stopping:
         early_stopping_object = keras.callbacks.EarlyStopping(
-            monitor='val_loss', min_delta=LOSS_PATIENCE,
-            patience=EARLY_STOPPING_PATIENCE_EPOCHS, verbose=1, mode='min'
+            monitor="val_loss",
+            min_delta=LOSS_PATIENCE,
+            patience=EARLY_STOPPING_PATIENCE_EPOCHS,
+            verbose=1,
+            mode="min",
         )
         list_of_callback_objects.append(early_stopping_object)
 
         plateau_object = keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss', factor=plateau_lr_multiplier,
-            patience=PLATEAU_PATIENCE_EPOCHS, verbose=1, mode='min',
-            min_delta=LOSS_PATIENCE, cooldown=PLATEAU_COOLDOWN_EPOCHS
+            monitor="val_loss",
+            factor=plateau_lr_multiplier,
+            patience=PLATEAU_PATIENCE_EPOCHS,
+            verbose=1,
+            mode="min",
+            min_delta=LOSS_PATIENCE,
+            cooldown=PLATEAU_COOLDOWN_EPOCHS,
         )
         list_of_callback_objects.append(plateau_object)
 
-    training_generator = input_generator(training_option_dict)
-    validation_generator = input_generator(validation_option_dict)
+    train_input_generator_partial = lambda: input_generator(training_option_dict)
+    training_generator = tf.data.Dataset.from_generator(
+        train_input_generator_partial,
+        output_signature=(
+            tf.TensorSpec(
+                shape=(
+                    (
+                        training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    )
+                    * (
+                        1
+                        + training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+                    ),
+                    380,
+                    540,
+                    1,
+                    1,
+                ),
+                dtype=tf.float16,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    (
+                        training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    )
+                    * (
+                        1
+                        + training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+                    ),
+                ),
+                dtype=tf.float16,
+            ),
+        ),
+    )
+    validation_input_generator_partial = lambda: input_generator(validation_option_dict)
+    validation_generator = tf.data.Dataset.from_generator(
+        validation_input_generator_partial,
+        output_signature=(
+            tf.TensorSpec(
+                shape=(
+                    (
+                        validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    ),
+                    380,
+                    540,
+                    1,
+                    1,
+                ),
+                dtype=tf.float16,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    (
+                        validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    ),
+                ),
+                dtype=tf.float16,
+            ),
+        ),
+    )
 
     metafile_name = find_metafile(
         model_file_name=model_file_name, raise_error_if_missing=False
@@ -2816,8 +2913,10 @@ def train_model(
     print('Writing metadata to: "{0:s}"...'.format(metafile_name))
 
     _write_metafile(
-        pickle_file_name=metafile_name, num_epochs=num_epochs,
-        use_crps_loss=use_crps_loss, quantile_levels=quantile_levels,
+        pickle_file_name=metafile_name,
+        num_epochs=num_epochs,
+        use_crps_loss=use_crps_loss,
+        quantile_levels=quantile_levels,
         central_loss_function_weight=central_loss_function_weight,
         num_training_batches_per_epoch=num_training_batches_per_epoch,
         training_option_dict=training_option_dict,
@@ -2825,16 +2924,261 @@ def train_model(
         validation_option_dict=validation_option_dict,
         do_early_stopping=do_early_stopping,
         plateau_lr_multiplier=plateau_lr_multiplier,
-        bnn_architecture_dict=bnn_architecture_dict
+        bnn_architecture_dict=bnn_architecture_dict,
     )
 
-    model_object.fit_generator(
-        generator=training_generator,
+    model_object.fit(
+        x=training_generator,
         steps_per_epoch=num_training_batches_per_epoch,
-        epochs=num_epochs, verbose=1, callbacks=list_of_callback_objects,
+        epochs=num_epochs,
+        verbose=1,
+        callbacks=list_of_callback_objects,
         validation_data=validation_generator,
-        validation_steps=num_validation_batches_per_epoch
+        validation_steps=num_validation_batches_per_epoch,
     )
+
+
+def plot_generator_output(
+    model_object,
+    output_dir_name,
+    num_epochs,
+    num_training_batches_per_epoch,
+    training_option_dict,
+    num_validation_batches_per_epoch,
+    validation_option_dict,
+    use_crps_loss,
+    bnn_architecture_dict,
+    do_early_stopping=True,
+    quantile_levels=None,
+    central_loss_function_weight=None,
+    plateau_lr_multiplier=DEFAULT_LEARNING_RATE_MULTIPLIER,
+):
+    """Trains neural net.
+
+    :param model_object: Untrained neural net (instance of `keras.models.Model`
+        or `keras.models.Sequential`).
+    :param output_dir_name: Path to output directory (model and training history
+        will be saved here).
+    :param num_epochs: Number of training epochs.
+    :param num_training_batches_per_epoch: Number of training batches per epoch.
+    :param training_option_dict: See doc for `input_generator`.  This dictionary
+        will be used to generate training data.
+    :param num_validation_batches_per_epoch: Number of validation batches per
+        epoch.
+    :param validation_option_dict: See doc for `input_generator`.  For
+        validation only, the following values will replace corresponding values
+        in `training_option_dict`:
+
+    validation_option_dict['example_dir_name']
+    validation_option_dict['years']
+
+    :param use_crps_loss: Boolean flag.  If True, using CRPS as a loss function.
+    :param bnn_architecture_dict: Dictionary with architecture options for
+        Bayesian neural network (BNN).  If the model being trained is not
+        Bayesian, make this None.
+    :param do_early_stopping: Boolean flag.  If True, will stop training early
+        if validation loss has not improved over last several epochs (see
+        constants at top of file for what exactly this means).
+    :param quantile_levels: 1-D numpy array of quantile levels for quantile
+        regression.  Levels must range from (0, 1).  If the model is not doing
+        quantile regression, make this None.
+    :param central_loss_function_weight: Weight for loss function used to
+        penalize central output.  If the model is not doing quantile regression,
+        make this None.
+    :param plateau_lr_multiplier: Multiplier for learning rate.  Learning
+        rate will be multiplied by this factor upon plateau in validation
+        performance.
+    """
+
+    file_system_utils.mkdir_recursive_if_necessary(directory_name=output_dir_name)
+
+    error_checking.assert_is_integer(num_epochs)
+    error_checking.assert_is_geq(num_epochs, 2)
+    error_checking.assert_is_boolean(use_crps_loss)
+    error_checking.assert_is_integer(num_training_batches_per_epoch)
+    error_checking.assert_is_geq(num_training_batches_per_epoch, 2)
+    error_checking.assert_is_integer(num_validation_batches_per_epoch)
+    error_checking.assert_is_geq(num_validation_batches_per_epoch, 2)
+    error_checking.assert_is_boolean(do_early_stopping)
+
+    if do_early_stopping:
+        error_checking.assert_is_greater(plateau_lr_multiplier, 0.0)
+        error_checking.assert_is_less_than(plateau_lr_multiplier, 1.0)
+
+    if quantile_levels is not None:
+        error_checking.assert_is_numpy_array(quantile_levels, num_dimensions=1)
+        error_checking.assert_is_greater_numpy_array(quantile_levels, 0.0)
+        error_checking.assert_is_less_than_numpy_array(quantile_levels, 1.0)
+        error_checking.assert_is_greater_numpy_array(numpy.diff(quantile_levels), 0.0)
+
+        error_checking.assert_is_geq(central_loss_function_weight, 1.0)
+
+    training_option_dict = _check_generator_args(training_option_dict)
+
+    validation_keys_to_keep = [
+        EXAMPLE_DIRECTORY_KEY,
+        YEARS_KEY,
+        SATELLITE_TIME_TOLERANCE_KEY,
+        SHIPS_TIME_TOLERANCE_KEY,
+    ]
+    for this_key in list(training_option_dict.keys()):
+        if this_key in validation_keys_to_keep:
+            continue
+
+        validation_option_dict[this_key] = training_option_dict[this_key]
+
+    # num_data_augmentations = (
+    # training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+    # + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+    # + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+    # )
+    # validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY] *= 1 + num_data_augmentations
+    # validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY] *= 1 + num_data_augmentations
+    # validation_option_dict[MAX_EXAMPLES_PER_CYCLONE_KEY] *= 1 + num_data_augmentations
+
+    validation_option_dict[SATELLITE_MAX_MISSING_TIMES_KEY] = int(1e10)
+    validation_option_dict[SHIPS_MAX_MISSING_TIMES_KEY] = int(1e10)
+    validation_option_dict[DATA_AUG_NUM_TRANS_KEY] = 0
+    validation_option_dict[DATA_AUG_NUM_ROTATIONS_KEY] = 0
+    validation_option_dict[DATA_AUG_NUM_NOISINGS_KEY] = 0
+
+    validation_option_dict = _check_generator_args(validation_option_dict)
+
+    model_file_name = "{0:s}/model.keras".format(output_dir_name)
+
+    history_object = keras.callbacks.CSVLogger(
+        filename="{0:s}/history.csv".format(output_dir_name),
+        separator=",",
+        append=False,
+    )
+    checkpoint_object = keras.callbacks.ModelCheckpoint(
+        filepath=model_file_name,
+        monitor="val_loss",
+        verbose=1,
+        save_best_only=True,
+        save_weights_only=False,
+        mode="min",
+        save_freq="epoch",
+    )
+    list_of_callback_objects = [history_object, checkpoint_object]
+
+    if do_early_stopping:
+        early_stopping_object = keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            min_delta=LOSS_PATIENCE,
+            patience=EARLY_STOPPING_PATIENCE_EPOCHS,
+            verbose=1,
+            mode="min",
+        )
+        list_of_callback_objects.append(early_stopping_object)
+
+        plateau_object = keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=plateau_lr_multiplier,
+            patience=PLATEAU_PATIENCE_EPOCHS,
+            verbose=1,
+            mode="min",
+            min_delta=LOSS_PATIENCE,
+            cooldown=PLATEAU_COOLDOWN_EPOCHS,
+        )
+        list_of_callback_objects.append(plateau_object)
+
+    train_input_generator_partial = lambda: input_generator(training_option_dict)
+    training_generator = tf.data.Dataset.from_generator(
+        train_input_generator_partial,
+        output_signature=(
+            tf.TensorSpec(
+                shape=(
+                    (
+                        training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    )
+                    * (
+                        1
+                        + training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+                    ),
+                    380,
+                    540,
+                    1,
+                    1,
+                ),
+                dtype=tf.float16,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    (
+                        training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    )
+                    * (
+                        1
+                        + training_option_dict[DATA_AUG_NUM_TRANS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_ROTATIONS_KEY]
+                        + training_option_dict[DATA_AUG_NUM_NOISINGS_KEY]
+                    ),
+                ),
+                dtype=tf.float16,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                    + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                ),
+                dtype=tf.string,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    training_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                    + training_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                ),
+                dtype=tf.int32,
+            ),
+        ),
+    )
+    validation_input_generator_partial = lambda: input_generator(validation_option_dict)
+    validation_generator = tf.data.Dataset.from_generator(
+        validation_input_generator_partial,
+        output_signature=(
+            tf.TensorSpec(
+                shape=(
+                    (
+                        validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    ),
+                    380,
+                    540,
+                    1,
+                    1,
+                ),
+                dtype=tf.float16,
+            ),
+            tf.TensorSpec(
+                shape=(
+                    (
+                        validation_option_dict[NUM_POSITIVE_EXAMPLES_KEY]
+                        + validation_option_dict[NUM_NEGATIVE_EXAMPLES_KEY]
+                    ),
+                ),
+                dtype=tf.float16,
+            ),
+        ),
+    )
+
+    for j, (images, labels, storm_ids, times) in enumerate(
+        itertools.islice(train_input_generator_partial(), 4)
+    ):
+        F = plt.figure(constrained_layout=True, figsize=(24, 18))
+        axes = F.subplots(4, 4)
+        for i, ax in enumerate(numpy.ravel(axes)):
+            ax.imshow(images[i, :, :, 0, 0])
+            if labels[i] == 1:
+                ax.patch.set_linewidth(5)
+                ax.patch.set_edgecolor("red")
+            this_timestamp = datetime.fromtimestamp(float(times[i]), tz=None)
+            ax.set_title(f"{storm_ids[i]}, {this_timestamp}")
+        F.savefig(f"../../figures/generator_batch_{j}.png")
 
 
 def read_model(hdf5_file_name):
@@ -2862,32 +3206,29 @@ def read_model(hdf5_file_name):
         # TODO(thunderhoser): Calling `create_crps_model_ri` will not work if
         # I introduce more methods to cnn_architecture_bayesian.py.
         model_object = cnn_architecture_bayesian.create_crps_model_ri(
-            option_dict_gridded_sat=
-            bnn_architecture_dict['option_dict_gridded_sat'],
-            option_dict_ungridded_sat=
-            bnn_architecture_dict['option_dict_ungridded_sat'],
-            option_dict_ships=bnn_architecture_dict['option_dict_ships'],
-            option_dict_dense=bnn_architecture_dict['option_dict_dense']
+            option_dict_gridded_sat=bnn_architecture_dict["option_dict_gridded_sat"],
+            option_dict_ungridded_sat=bnn_architecture_dict[
+                "option_dict_ungridded_sat"
+            ],
+            option_dict_ships=bnn_architecture_dict["option_dict_ships"],
+            option_dict_dense=bnn_architecture_dict["option_dict_dense"],
         )
 
         model_object.load_weights(hdf5_file_name)
         return model_object
 
     if quantile_levels is None and not use_crps_loss:
-        return tf_keras.models.load_model(
-            hdf5_file_name, custom_objects=METRIC_DICT
-        )
+        return tf_keras.models.load_model(hdf5_file_name, custom_objects=METRIC_DICT)
 
     if use_crps_loss:
-        custom_object_dict = {
-            'loss': custom_losses.crps_loss()
-        }
+        custom_object_dict = {"loss": custom_losses.crps_loss()}
         model_object = tf_keras.models.load_model(
             hdf5_file_name, custom_objects=custom_object_dict, compile=False
         )
         model_object.compile(
-            loss=custom_object_dict['loss'], optimizer=keras.optimizers.Adam(),
-            metrics=[]
+            loss=custom_object_dict["loss"],
+            optimizer=keras.optimizers.Adam(),
+            metrics=[],
         )
 
         return model_object
@@ -2898,58 +3239,61 @@ def read_model(hdf5_file_name):
     if predict_td_to_ts:
         loss_function = custom_losses.quantile_loss_plus_xentropy_3d_output(
             quantile_levels=quantile_levels,
-            central_loss_weight=metadata_dict[CENTRAL_LOSS_WEIGHT_KEY]
+            central_loss_weight=metadata_dict[CENTRAL_LOSS_WEIGHT_KEY],
         )
-        custom_object_dict = {'loss': loss_function}
+        custom_object_dict = {"loss": loss_function}
 
         model_object = tf_keras.models.load_model(
             hdf5_file_name, custom_objects=custom_object_dict, compile=False
         )
         model_object.compile(
-            loss=custom_object_dict['loss'], optimizer=keras.optimizers.Adam(),
-            metrics=[]
+            loss=custom_object_dict["loss"],
+            optimizer=keras.optimizers.Adam(),
+            metrics=[],
         )
 
         return model_object
 
     central_loss_function = _multiply_a_function(
         orig_function_handle=keras.losses.binary_crossentropy,
-        real_number=metadata_dict[CENTRAL_LOSS_WEIGHT_KEY]
+        real_number=metadata_dict[CENTRAL_LOSS_WEIGHT_KEY],
     )
 
-    custom_object_dict = {
-        'central_output_loss': central_loss_function
-    }
-    loss_dict = {'central_output': central_loss_function}
+    custom_object_dict = {"central_output_loss": central_loss_function}
+    loss_dict = {"central_output": central_loss_function}
     metric_list = []
 
     for k in range(len(quantile_levels)):
         this_loss_function = custom_losses.quantile_loss(
             quantile_level=quantile_levels[k]
         )
-        loss_dict['quantile_output{0:03d}'.format(k + 1)] = (
-            this_loss_function
-        )
-        custom_object_dict['quantile_output{0:03d}_loss'.format(k + 1)] = (
+        loss_dict["quantile_output{0:03d}".format(k + 1)] = this_loss_function
+        custom_object_dict["quantile_output{0:03d}_loss".format(k + 1)] = (
             this_loss_function
         )
 
-    custom_object_dict['loss'] = loss_dict
+    custom_object_dict["loss"] = loss_dict
 
     model_object = tf_keras.models.load_model(
         hdf5_file_name, custom_objects=custom_object_dict, compile=False
     )
     model_object.compile(
-        loss=custom_object_dict['loss'], optimizer=keras.optimizers.Adam(),
-        metrics=metric_list
+        loss=custom_object_dict["loss"],
+        optimizer=keras.optimizers.Adam(),
+        metrics=metric_list,
     )
 
     return model_object
 
 
 def apply_model(
-        model_object, model_metadata_dict, predictor_matrices,
-        num_examples_per_batch, use_dropout=False, verbose=False):
+    model_object,
+    model_metadata_dict,
+    predictor_matrices,
+    num_examples_per_batch,
+    use_dropout=False,
+    verbose=False,
+):
     """Applies trained neural net (inference mode).
 
     E = number of examples
@@ -2983,27 +3327,29 @@ def apply_model(
 
     if use_dropout:
         for layer_object in model_object.layers:
-            if 'batch' in layer_object.name.lower():
-                print('Layer "{0:s}" set to NON-TRAINABLE!'.format(
-                    layer_object.name
-                ))
+            if "batch" in layer_object.name.lower():
+                print('Layer "{0:s}" set to NON-TRAINABLE!'.format(layer_object.name))
                 layer_object.trainable = False
 
     option_dict = model_metadata_dict[VALIDATION_OPTIONS_KEY]
 
     if option_dict[PREDICT_TD_TO_TS_KEY]:
         forecast_prob_matrix = _apply_model_td_to_ts(
-            model_object=model_object, predictor_matrices=predictor_matrices,
+            model_object=model_object,
+            predictor_matrices=predictor_matrices,
             num_examples_per_batch=num_examples_per_batch,
-            use_dropout=use_dropout, verbose=verbose
+            use_dropout=use_dropout,
+            verbose=verbose,
         )
     else:
         forecast_prob_matrix = _apply_model_ri(
-            model_object=model_object, predictor_matrices=predictor_matrices,
+            model_object=model_object,
+            predictor_matrices=predictor_matrices,
             num_examples_per_batch=num_examples_per_batch,
-            use_dropout=use_dropout, verbose=verbose
+            use_dropout=use_dropout,
+            verbose=verbose,
         )
 
-    forecast_prob_matrix = numpy.maximum(forecast_prob_matrix, 0.)
-    forecast_prob_matrix = numpy.minimum(forecast_prob_matrix, 1.)
+    forecast_prob_matrix = numpy.maximum(forecast_prob_matrix, 0.0)
+    forecast_prob_matrix = numpy.minimum(forecast_prob_matrix, 1.0)
     return forecast_prob_matrix
